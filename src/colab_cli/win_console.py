@@ -66,9 +66,10 @@ if sys.platform == "win32":
 else:
     _kernel32 = None
 
-# Fallback mapping for "enhanced" keys that some Windows consoles still deliver
-# as a \\x00/\\xe0 prefix plus a scan code even with VT input enabled. Values
-# are the equivalent VT sequences the POSIX path would send.
+# msvcrt.getwch() reads console input records directly and is unaffected by
+# ENABLE_VIRTUAL_TERMINAL_INPUT, so enhanced keys (arrows, Home, ...) always
+# arrive as a \x00/\xe0 prefix plus a scan code. Values are the equivalent VT
+# sequences the POSIX path would send.
 _ENHANCED_KEY_SEQUENCES = {
     "H": "\x1b[A",  # Up
     "P": "\x1b[B",  # Down

@@ -31,9 +31,8 @@ Run these steps in **Windows Terminal** (and once in a plain conhost
 
 8. **Exit**: type `exit` — the session ends and `Connection closed.` prints;
    console modes must be fully restored afterwards (verify by typing in the
-   same PowerShell window: normal line editing and echo work, Ctrl-C kills
-   local commands again, `stty size` isn't applicable — just confirm the
-   shell behaves normally).
+   same PowerShell window: normal line editing and echo work again, and
+   Ctrl-C kills local commands again).
 
 9. **Piped regression**: `echo 'echo hello from pipe' | uv run colab console -s <name>`
    must still exit cleanly on EOF (prints the output and terminates).

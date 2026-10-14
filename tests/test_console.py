@@ -44,6 +44,21 @@ def mock_session():
     )
 
 
+class SyncReaderThread:
+    """threading.Thread stand-in that runs the stdin reader synchronously.
+
+    The resize poller (if any) is not exercised by these tests.
+    """
+
+    def __init__(self, target, args=None, daemon=None):
+        self.target = target
+        self.args = args or ()
+
+    def start(self):
+        if self.target.__name__ == "read_stdin_loop":
+            self.target(*self.args)
+
+
 @needs_termios
 @patch("colab_cli.console.websocket.WebSocketApp")
 @patch("colab_cli.console.tty.setraw")
@@ -83,11 +98,16 @@ def test_console_initialization(
 
     # 2. Verify raw mode setup and teardown
     mock_tcgetattr.assert_called_once_with(sys.stdin.fileno())
-    mock_setraw.assert_called_once_with(sys.stdin.fileno(), termios.TCSANOW)
+    mock_setraw.assert_called_once_with(
+        sys.stdin.fileno(),
+        termios.TCSANOW,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+    )
 
     # Teardown should happen in a finally block
     mock_tcsetattr.assert_called_once_with(
-        sys.stdin.fileno(), termios.TCSANOW, ["fake_attrs"]
+        sys.stdin.fileno(),
+        termios.TCSANOW,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+        ["fake_attrs"],
     )
 
 
@@ -168,25 +188,9 @@ def test_read_stdin_eof_piped_sends_exit_and_closes_ws(
 
     mock_ws = MagicMock()
 
-    # on_open spawns the read thread; we want it to run synchronously here
-    # so we patch threading.Thread to call target immediately and join().
-    real_thread = []
-
-    class SyncThread:
-        def __init__(self, target, args=None, daemon=None):
-            self.target = target
-            self.args = args or ()
-            real_thread.append(self)
-
-        def start(self):
-            # Run only the stdin reader synchronously; the resize poller (if
-            # any) is not exercised in this test.
-            if self.target.__name__ == "read_stdin_loop":
-                self.target(*self.args)
-
     console_mod._is_running = True
     with (
-        patch("colab_cli.console.threading.Thread", SyncThread),
+        patch("colab_cli.console.threading.Thread", SyncReaderThread),
         # Use a tiny grace period for the test
         patch("colab_cli.console.PIPED_EOF_GRACE_SECONDS", 0.01),
     ):
@@ -225,19 +229,8 @@ def test_read_stdin_eof_tty_does_not_close_ws(
 
     mock_ws = MagicMock()
 
-    class SyncThread:
-        def __init__(self, target, args=None, daemon=None):
-            self.target = target
-            self.args = args or ()
-
-        def start(self):
-            # Run only the stdin reader synchronously; the resize poller (if
-            # any) is not exercised in this test.
-            if self.target.__name__ == "read_stdin_loop":
-                self.target(*self.args)
-
     console_mod._is_running = True
-    with patch("colab_cli.console.threading.Thread", SyncThread):
+    with patch("colab_cli.console.threading.Thread", SyncReaderThread):
         on_open(mock_ws)
 
     sent_payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
@@ -432,22 +425,19 @@ def test_stop_resize_poller_signals_event():
 
 
 def test_read_stdin_uses_win_read_key_when_active():
-    """When _win_raw_input_active is set (Windows TTY), the stdin reader loop
+    """When use_win_raw is passed (Windows TTY), the stdin reader loop
     sources characters from colab_cli.win_console.read_key instead of
     sys.stdin.read, and a None key ends the loop without closing the socket."""
     import colab_cli.console as console_mod
 
     mock_ws = MagicMock()
     keys = iter(["l", "s", "\r", None])
-    with (
-        patch.object(console_mod, "_win_raw_input_active", True),
-        patch.object(
-            console_mod.win_console, "read_key", side_effect=lambda: next(keys)
-        ),
+    with patch.object(
+        console_mod.win_console, "read_key", side_effect=lambda: next(keys)
     ):
         console_mod._is_running = True
         try:
-            console_mod.read_stdin_loop(mock_ws, is_tty=True)
+            console_mod.read_stdin_loop(mock_ws, is_tty=True, use_win_raw=True)
         finally:
             console_mod._is_running = False
 
@@ -457,21 +447,19 @@ def test_read_stdin_uses_win_read_key_when_active():
 
 
 def test_read_stdin_piped_path_ignores_win_read_key():
-    """Piped mode must keep using sys.stdin.read (no regression)."""
+    """Piped mode must keep using sys.stdin.read even when the caller passes
+    use_win_raw=True (no regression on the piped path)."""
     import colab_cli.console as console_mod
 
     mock_ws = MagicMock()
     chars = iter(["h", "i", "\n", ""])
     mock_stdin = MagicMock()
     mock_stdin.read.side_effect = lambda n: next(chars)
-    with (
-        patch.object(console_mod, "_win_raw_input_active", True),
-        patch.object(console_mod.sys, "stdin", mock_stdin),
-    ):
+    with patch.object(console_mod.sys, "stdin", mock_stdin):
         console_mod._is_running = True
         try:
             with patch("colab_cli.console.PIPED_EOF_GRACE_SECONDS", 0.01):
-                console_mod.read_stdin_loop(mock_ws, is_tty=False)
+                console_mod.read_stdin_loop(mock_ws, is_tty=False, use_win_raw=True)
         finally:
             console_mod._is_running = False
 
@@ -484,8 +472,8 @@ def test_read_stdin_piped_path_ignores_win_read_key():
 @patch("colab_cli.console.sys.stdin.isatty")
 def test_connect_console_activates_win_raw_mode(mock_isatty, mock_ws_app, mock_session):
     """On win32 with a TTY, connect_console enters the Windows raw-console
-    context (so raw input + VT output are active during run_forever) and
-    deactivates the flag afterwards."""
+    context (so raw input + VT output are active during run_forever) and wires
+    the raw reader mode into the on_open callback."""
     import colab_cli.console as console_mod
 
     mock_isatty.return_value = True
@@ -511,7 +499,8 @@ def test_connect_console_activates_win_raw_mode(mock_isatty, mock_ws_app, mock_s
         connect_console(mock_session)
 
     assert entered == ["enter", "exit"]
-    assert console_mod._win_raw_input_active is False
+    on_open_cb = mock_ws_app.call_args.kwargs["on_open"]
+    assert on_open_cb.keywords == {"use_win_raw": True}
     mock_ws_instance.run_forever.assert_called_once()
 
 
@@ -544,4 +533,5 @@ def test_connect_console_falls_back_when_win_raw_setup_fails(
         connect_console(mock_session)  # must not raise
 
     mock_ws_instance.run_forever.assert_called_once()
-    assert console_mod._win_raw_input_active is False
+    on_open_cb = mock_ws_app.call_args.kwargs["on_open"]
+    assert on_open_cb.keywords == {"use_win_raw": False}
