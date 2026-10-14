@@ -60,9 +60,7 @@ def _make_session(
 def _patch_proxy(mocker):
     """Stub the proxy-mode I/O seams (pubkey, connect, bridge)."""
     mocker.patch.object(ssh_module, "_resolve_pubkey", return_value="pk")
-    mocker.patch.object(
-        ssh_module, "_connect_websocket", return_value=MagicMock()
-    )
+    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
     mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
 
 
@@ -77,16 +75,12 @@ def test_proxy_mode_rm_stops_even_if_bridge_raises(mock_common_state, mocker):
     mocker.patch("signal.signal")
     stop = mocker.patch("colab_cli.commands.session.stop")
     mocker.patch.object(ssh_module, "_resolve_pubkey", return_value="pk")
-    mocker.patch.object(
-        ssh_module, "_connect_websocket", return_value=MagicMock()
-    )
+    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
     mocker.patch.object(
         ssh_module, "_bridge_proxy_mode", side_effect=RuntimeError("ws died")
     )
 
-    result = runner.invoke(
-        app, ["ssh", "--proxy-mode", "-s", "colab-ephem", "--rm"]
-    )
+    result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "colab-ephem", "--rm"])
     assert result.exit_code != 0
     stop.assert_called_once_with(session="colab-ephem")
 
@@ -162,9 +156,7 @@ def test_proxy_bridge_routes_rm_output_to_stderr(mocker, capsys):
     sess = _make_session("colab")
     mocker.patch("signal.signal")
     mocker.patch.object(ssh_module, "_resolve_pubkey", return_value="pk")
-    mocker.patch.object(
-        ssh_module, "_connect_websocket", return_value=MagicMock()
-    )
+    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
     mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
 
     def stop_echo(session=None):
@@ -247,21 +239,18 @@ def test_proxy_mode_rm_teardown_idempotent(mock_common_state, mocker):
     mocker.patch("os._exit")  # keep the handler from killing the test process
     stop = mocker.patch("colab_cli.commands.session.stop")
     mocker.patch.object(ssh_module, "_resolve_pubkey", return_value="pk")
-    mocker.patch.object(
-        ssh_module, "_connect_websocket", return_value=MagicMock()
-    )
+    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
 
     def bridge_then_hup(ws):
-        handlers[_signal.SIGHUP](_signal.SIGHUP, None)  # OpenSSH HUPs us
+        # OpenSSH HUPs the ProxyCommand; Windows has no SIGHUP, so fall back
+        # to the equivalent terminating signal that *is* registered there.
+        term_sig = getattr(_signal, "SIGHUP", None) or _signal.SIGTERM
+        handlers[term_sig](term_sig, None)
         return 0
 
-    mocker.patch.object(
-        ssh_module, "_bridge_proxy_mode", side_effect=bridge_then_hup
-    )
+    mocker.patch.object(ssh_module, "_bridge_proxy_mode", side_effect=bridge_then_hup)
 
-    result = runner.invoke(
-        app, ["ssh", "--proxy-mode", "-s", "colab-ephem", "--rm"]
-    )
+    result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "colab-ephem", "--rm"])
     assert result.exit_code == 0
     stop.assert_called_once_with(session="colab-ephem")
 
@@ -278,6 +267,28 @@ def test_proxy_mode_rm_stops_reused_session(mock_common_state, mocker):
     mocker.patch("signal.signal")
     stop = mocker.patch("colab_cli.commands.session.stop")
     _patch_proxy(mocker)
+
+    result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "colab", "--rm"])
+    assert result.exit_code == 0
+    stop.assert_called_once_with(session="colab")
+
+
+def test_proxy_mode_rm_teardown_runs_on_pipe_close(mock_common_state, mocker):
+    """Pipe close (stdin EOF) alone must trigger --rm teardown.
+
+    Win32-OpenSSH does not deliver SIGHUP to a ProxyCommand, so on Windows
+    cleanup relies on the bridge returning when the pipe closes; this pins
+    the `finally` path that guarantees it (D4).
+    """
+    sess = _make_session("colab")
+    mock_common_state.store.get.return_value = sess
+    mock_common_state.resolve_session.return_value = "colab"
+    mocker.patch("signal.signal")
+    stop = mocker.patch("colab_cli.commands.session.stop")
+    mocker.patch.object(ssh_module, "_resolve_pubkey", return_value="pk")
+    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
+    # A clean 0 means the pump loop ended on stdin EOF (the pipe closed).
+    mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
 
     result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "colab", "--rm"])
     assert result.exit_code == 0

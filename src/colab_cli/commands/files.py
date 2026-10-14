@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import click
+import contextlib
 import hashlib
 import os
 import tempfile
@@ -154,9 +155,12 @@ def edit(
 
     _, ext = os.path.splitext(remote_path)
 
-    with tempfile.NamedTemporaryFile(suffix=ext) as tf:
-        local_path = tf.name
-
+    # mkstemp + close keeps the path re-openable by the editor: Windows locks
+    # a NamedTemporaryFile(delete=True) for as long as our handle is open, so
+    # click.edit() got PermissionError(13) there (F1).
+    fd, local_path = tempfile.mkstemp(suffix=ext)
+    os.close(fd)
+    try:
         try:
             contents.download(remote_path, local_path)
         except Exception:
@@ -179,6 +183,9 @@ def edit(
             typer.echo(f"[colab] Edited and uploaded '{remote_path}'")
         else:
             typer.echo(f"[colab] No changes made to '{remote_path}'")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(local_path)
 
 
 def register(app: typer.Typer):

@@ -52,18 +52,14 @@ def _patch_interactive(mocker):
     mocker.patch.object(
         ssh_module, "_resolve_pubkey", return_value="ssh-ed25519 AAAA u@h"
     )
-    return mocker.patch.object(
-        ssh_module, "_run_interactive_ssh", return_value=0
-    )
+    return mocker.patch.object(ssh_module, "_run_interactive_ssh", return_value=0)
 
 
 def _patch_proxy(mocker):
     mocker.patch.object(
         ssh_module, "_resolve_pubkey", return_value="ssh-ed25519 AAAA u@h"
     )
-    mocker.patch.object(
-        ssh_module, "_connect_websocket", return_value=MagicMock()
-    )
+    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
     mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
 
 
@@ -149,9 +145,7 @@ def test_bare_ssh_forwards_high_mem_on_autocreate(mock_common_state, mocker):
     ],
     ids=["missing-creates", "missing-creates-gpu", "existing-reuses"],
 )
-def test_proxy_mode_create_or_reuse(
-    mock_common_state, mocker, exists, gpu, expect_new
-):
+def test_proxy_mode_create_or_reuse(mock_common_state, mocker, exists, gpu, expect_new):
     created = _make_session("colab")
     if exists:
         mock_common_state.store.get.return_value = created
@@ -263,9 +257,7 @@ def test_proxy_mode_rm_teardown(mock_common_state, mocker, rm, expect_stop):
     [(False, True), (True, False)],
     ids=["autocreated-stops", "reused-keeps"],
 )
-def test_interactive_rm_teardown(
-    mock_common_state, mocker, has_existing, expect_stop
-):
+def test_interactive_rm_teardown(mock_common_state, mocker, has_existing, expect_stop):
     """Interactive --rm stops only a runtime `colab ssh` auto-created."""
     if has_existing:
         sess = _make_session("only")
@@ -316,9 +308,32 @@ def test_proxy_mode_signal_handler_installation(
     assert result.exit_code == 0
     if expect_installed:
         registered = {c.args[0] for c in sigmock.call_args_list}
-        assert {_signal.SIGHUP, _signal.SIGTERM, _signal.SIGINT} <= registered
+        expected = {
+            getattr(_signal, sig, None) for sig in ("SIGHUP", "SIGTERM", "SIGINT")
+        }
+        expected.discard(None)  # e.g. Windows has no SIGHUP
+        assert expected <= registered
     else:
         sigmock.assert_not_called()
+
+
+def test_signal_handlers_skip_missing_sighup(mocker):
+    """Platforms without SIGHUP (Windows) install SIGTERM/SIGINT only.
+
+    ``signal.SIGHUP`` does not exist on Windows, and accessing it outside the
+    try/except used to raise ``AttributeError`` before any handler was
+    installed -- so `--rm` always died there.
+    """
+    import signal as _signal
+
+    mocker.patch.object(_signal, "SIGHUP", None, create=True)
+    sigmock = mocker.patch("signal.signal")
+    stopped = []
+
+    ssh_module._install_rm_signal_handlers(lambda: stopped.append(True))
+
+    registered = {c.args[0] for c in sigmock.call_args_list}
+    assert registered == {_signal.SIGTERM, _signal.SIGINT}
 
 
 # --- help --------------------------------------------------------------------

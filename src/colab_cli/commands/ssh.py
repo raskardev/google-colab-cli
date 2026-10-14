@@ -92,9 +92,7 @@ def _pubkey_from_identity(identity: str) -> str:
         raise typer.Exit(code=2)
     pubkey = res.stdout.strip()
     if not pubkey:
-        typer.echo(
-            f"[colab] ssh-keygen produced no key for {identity}.", err=True
-        )
+        typer.echo(f"[colab] ssh-keygen produced no key for {identity}.", err=True)
         raise typer.Exit(code=2)
     return pubkey
 
@@ -388,6 +386,23 @@ def _bridge_proxy_mode(ws: websocket.WebSocket) -> int:
     return 0
 
 
+def _is_windows() -> bool:
+    """True on Windows. Kept as a function so tests can patch the platform."""
+    return sys.platform == "win32"
+
+
+def _join_command(cmd: list[str]) -> str:
+    """Serializes an argv for the shell that will eventually run it.
+
+    OpenSSH on Windows runs ProxyCommand through ``cmd.exe``, which does not
+    understand POSIX single quotes; ``subprocess.list2cmdline`` emits the
+    double-quote form cmd.exe expects, so paths with spaces survive.
+    """
+    if _is_windows():
+        return subprocess.list2cmdline(cmd)
+    return shlex.join(cmd)
+
+
 def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     """Builds the OpenSSH ProxyCommand that bridges this session's WebSocket.
 
@@ -405,11 +420,14 @@ def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     ]
     if identity:
         self_cmd.extend(["--identity", identity])
-    return shlex.join(self_cmd)
+    return _join_command(self_cmd)
 
 
 def _ssh_base_args(proxy_command: str, identity: Optional[str]) -> list[str]:
     """Builds the shared ``ssh`` invocation (ProxyCommand + hardening)."""
+    # Windows OpenSSH resolves `/dev/null` to a bogus drive-relative path
+    # (e.g. C:\dev\null); `NUL` is the Win32 null device (F11).
+    known_hosts_null = "NUL" if _is_windows() else "/dev/null"
     args = [
         "ssh",
         "-o",
@@ -417,7 +435,7 @@ def _ssh_base_args(proxy_command: str, identity: Optional[str]) -> list[str]:
         "-o",
         "StrictHostKeyChecking=no",
         "-o",
-        "UserKnownHostsFile=/dev/null",
+        f"UserKnownHostsFile={known_hosts_null}",
         "-o",
         "LogLevel=ERROR",
     ]
@@ -478,9 +496,7 @@ def _select_proxy_session(
     """
     if session and not _session_exists(session):
         with contextlib.redirect_stdout(sys.stderr):
-            return _auto_create_session(
-                gpu, tpu, name=session, high_mem=high_mem
-            ), True
+            return _auto_create_session(gpu, tpu, name=session, high_mem=high_mem), True
     return _resolve_session(session), False
 
 
@@ -542,16 +558,19 @@ def _install_rm_signal_handlers(do_rm: Callable[[], None]) -> None:
         do_rm()
         os._exit(0)
 
-    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+    # SIGHUP is the usual ProxyCommand-disconnect signal on POSIX but does not
+    # exist on Windows, where cleanup relies on SIGTERM/SIGINT and the pipe
+    # closing (F2).
+    for sig in (getattr(signal, "SIGHUP", None), signal.SIGTERM, signal.SIGINT):
+        if sig is None:
+            continue
         try:
             signal.signal(sig, _on_signal)
         except (ValueError, OSError):
             pass  # e.g. not running in the main thread
 
 
-def _run_proxy_bridge(
-    s: SessionState, identity: Optional[str], rm: bool
-) -> int:
+def _run_proxy_bridge(s: SessionState, identity: Optional[str], rm: bool) -> int:
     """Runs the ``--proxy-mode`` WebSocket-stdio bridge, honoring ``--rm``.
 
     Args:
