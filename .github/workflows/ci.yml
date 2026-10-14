@@ -1,0 +1,69 @@
+# GitHub Actions CI: unit tests + lint on Linux, macOS and Windows.
+#
+# This workflow runs the *unit* test suite only. The integration tests under
+# integration/ are deliberately NOT run here: they talk to the live Colab
+# backend and every successful assignment allocates a real (billable) VM, plus
+# several of them require interactive auth. Run those locally instead.
+#
+# Matrix note: `requires-python = ">=3.12"` in pyproject.toml with no upper
+# bound, so we test the oldest supported interpreter (3.12, also the version in
+# .python-version) and the newest one we support today (3.13).
+#
+# `PYTHONUTF8` is intentionally NOT set: Windows defaults to the cp1252 code
+# page and we want the suite to catch UTF-8/encoding regressions there rather
+# than papering over them.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs of the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      # Report every failing leg instead of aborting the matrix on the first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the package version from `git describe`, so the
+          # checkout needs the full history and tags (the Cloud Build release
+          # pipeline unshallows for the same reason).
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # Sets UV_PYTHON, which takes precedence over the repo's
+          # .python-version file, so each leg really uses its matrix version.
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run unit tests
+        run: uv run pytest tests/ -q
+
+      # Lint once (not per-OS): ruff's findings are platform independent.
+      # examples/ is excluded because examples/finetune_run.py intentionally
+      # imports after a runtime `os.system("pip install ...")` call, which ruff
+      # flags as E402 (5 pre-existing errors). Tracked separately from CI.
+      - name: Lint
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        run: uv run ruff check . --exclude examples
