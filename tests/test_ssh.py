@@ -282,8 +282,12 @@ def test_bridge_proxy_mode_pumps_stdin_to_ws(mocker):
 _WIN_EXE = r"C:\Program Files\Python312\python.exe"
 
 
-def _cmd_argv(cmdline: str) -> list[str]:
-    """Re-parse a command line the way the Windows C runtime does."""
+def _shell32_argv(cmdline: str) -> list[str]:
+    """Parse a command line with shell32's ``CommandLineToArgvW``.
+
+    Not a valid oracle for trailing-backslash cases: shell32 parsing
+    diverges from the MSVCRT parser there.
+    """
     import ctypes
 
     shell32 = ctypes.WinDLL("shell32")
@@ -307,7 +311,7 @@ def _cmd_argv(cmdline: str) -> list[str]:
 def _parse_proxy_command(cmd: str) -> list[str]:
     """Parse a ProxyCommand the way the platform's shell would."""
     if sys.platform == "win32":
-        return _cmd_argv(cmd)
+        return _shell32_argv(cmd)
     return shlex.split(cmd)
 
 
@@ -438,7 +442,7 @@ def test_proxy_command_windows_metachars_round_trip_through_crt_argv(mocker, exe
 
     cmd = ssh_module._proxy_command(_make_session(name=name), None)
 
-    assert _cmd_argv(cmd) == [
+    assert _shell32_argv(cmd) == [
         exe,
         "-m",
         "colab_cli.cli",
@@ -460,7 +464,7 @@ def test_proxy_command_windows_round_trips_through_crt_argv(mocker):
     cmd = ssh_module._proxy_command(_make_session(name="a b"), "/k/id ed25519")
 
     assert f'"{_WIN_EXE}"' in cmd
-    assert _cmd_argv(cmd) == [
+    assert _shell32_argv(cmd) == [
         _WIN_EXE,
         "-m",
         "colab_cli.cli",

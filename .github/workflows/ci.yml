@@ -61,9 +61,8 @@ jobs:
         run: uv run pytest tests/ -q
 
       # Lint once (not per-OS): ruff's findings are platform independent.
-      # examples/ is excluded because examples/finetune_run.py intentionally
-      # imports after a runtime `os.system("pip install ...")` call, which ruff
-      # flags as E402 (5 pre-existing errors). Tracked separately from CI.
+      # examples/finetune_run.py's E402 is waived via per-file-ignores in
+      # pyproject.toml (it imports after a runtime pip install).
       - name: Lint
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
-        run: uv run ruff check . --exclude examples
+        run: uv run ruff check .
