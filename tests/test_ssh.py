@@ -347,10 +347,112 @@ def test_proxy_command_quoting_per_platform(mocker, on_windows, exe, name, ident
         assert "'" in cmd  # single quoting for /bin/sh
 
 
+@pytest.mark.parametrize(
+    ("exe", "name", "quoted"),
+    [
+        (r"C:\tools\py.exe", "a&b", '"a&b"'),
+        (r"C:\tools\py.exe", "a|b", '"a|b"'),
+        (r"C:\tools\py.exe", "a(b)", '"a(b)"'),
+        (r"C:\tools\py.exe", "a^b", '"a^b"'),
+        (r"C:\tools\py.exe", "a<b>c", '"a<b>c"'),
+        (
+            r"C:\Program Files (x86)\Python\python.exe",
+            "plain",
+            r'"C:\Program Files (x86)\Python\python.exe"',
+        ),
+        (
+            "C:\\Program Files (x86)\\Python\\",
+            "plain",
+            r'"C:\Program Files (x86)\Python\\"',
+        ),
+    ],
+    ids=[
+        "ampersand",
+        "pipe",
+        "parens",
+        "caret",
+        "redirects",
+        "exe-parens-spaces",
+        "trailing-backslash",
+    ],
+)
+def test_proxy_command_windows_quotes_cmd_metacharacters(mocker, exe, name, quoted):
+    r"""cmd.exe metacharacters force quoting even when there is no whitespace.
+
+    `list2cmdline` alone only quotes on spaces/tabs, so ``x&calc`` would be
+    chained by cmd.exe and ``C:\Program Files (x86)\...`` needs its trailing
+    backslash doubled inside the quotes (MSVCRT rules).
+    """
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", exe)
+
+    cmd = ssh_module._proxy_command(_make_session(name=name), None)
+
+    assert quoted in cmd
+    # Plain arguments (no whitespace, no metacharacter) stay unquoted.
+    assert "-m colab_cli.cli ssh --proxy-mode -s" in cmd
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["%", 'a"b', "a!b", "a\nb"],
+    ids=["percent", "double-quote", "bang", "newline"],
+)
+def test_proxy_command_windows_rejects_cmd_unsafe_characters(mocker, capsys, bad):
+    """cmd.exe cannot carry `%` (expansion), `"`, `!`, or newlines."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", r"C:\tools\py.exe")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        ssh_module._proxy_command(_make_session(name=f"x{bad}y"), None)
+
+    assert excinfo.value.exit_code == 2
+    assert "cmd.exe" in capsys.readouterr().err
+
+
+def test_proxy_command_posix_allows_percent_and_bang(mocker):
+    """The win32 restriction must not leak into the POSIX serialization."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=False)
+
+    cmd = ssh_module._proxy_command(_make_session(name="a%b!c"), None)
+
+    assert shlex.split(cmd)[-1] == "a%b!c"
+
+
 @pytest.mark.skipif(
     sys.platform != "win32", reason="CommandLineToArgvW is Windows-only"
 )
-def test_proxy_command_windows_round_trips_through_cmd(mocker):
+@pytest.mark.parametrize(
+    ("exe", "name"),
+    [
+        (r"C:\tools\py.exe", "x&calc"),
+        (r"C:\tools\py.exe", "a|b"),
+        (r"C:\tools\py.exe", "a(b)"),
+    ],
+    ids=["ampersand", "pipe", "parens"],
+)
+def test_proxy_command_windows_metachars_round_trip_through_crt_argv(mocker, exe, name):
+    """Quoted metachar/trailing-backslash args survive CRT argv parsing."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", exe)
+
+    cmd = ssh_module._proxy_command(_make_session(name=name), None)
+
+    assert _cmd_argv(cmd) == [
+        exe,
+        "-m",
+        "colab_cli.cli",
+        "ssh",
+        "--proxy-mode",
+        "-s",
+        name,
+    ]
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="CommandLineToArgvW is Windows-only"
+)
+def test_proxy_command_windows_round_trips_through_crt_argv(mocker):
     """A spaces-in-path executable survives cmd.exe word splitting."""
     mocker.patch.object(ssh_module, "_is_windows", return_value=True)
     mocker.patch.object(sys, "executable", _WIN_EXE)

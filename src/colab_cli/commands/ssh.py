@@ -119,7 +119,7 @@ def _resolve_pubkey(identity: Optional[str]) -> str:
     for name in _KEY_TYPES:
         candidate = ssh_dir / name
         if candidate.exists():
-            return candidate.read_text().strip()
+            return candidate.read_text(encoding="utf-8").strip()
     typer.echo(
         "[colab] no SSH public key found in ~/.ssh/. Run "
         "`ssh-keygen -t ed25519` to generate one, or pass --identity.",
@@ -391,6 +391,68 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+# cmd.exe expands `%VAR%` and swallows `!` (delayed expansion), and a literal
+# `"` cannot be represented inside a quoted argument; a newline/CR would end the
+# command. None of these can be carried safely, so the command is refused.
+_CMD_UNSAFE_CHARS = '%"!\r\n'
+# Characters cmd.exe interprets itself: they must be quoted even when the
+# argument contains no whitespace (`x&calc` would otherwise be chained).
+_CMD_METACHARS = "&|^<>()"
+
+
+def _quote_windows_arg(arg: str) -> str:
+    """Serializes one argv entry for a cmd.exe command line.
+
+    ``subprocess.list2cmdline`` only quotes on whitespace/tabs, so it leaves
+    cmd.exe metacharacters (`&`, `|`, `^`, `<`, `>`, `(`, `)`) bare. Such
+    arguments are force-quoted using the MSVCRT rules (backslashes that
+    precede the closing quote are doubled) so the receiving process re-parses
+    the exact original value. Plain arguments are left unquoted.
+
+    Args:
+      arg: One already-split argv entry.
+
+    Returns:
+      The argument, quoted if needed.
+
+    Raises:
+      typer.Exit: If the argument contains a character cmd.exe cannot carry
+        safely (`%`, `"`, `!`, CR/LF) (exit code 2).
+    """
+    if any(c in arg for c in _CMD_UNSAFE_CHARS):
+        typer.echo(
+            f'[colab] {arg!r} contains a character ("%", \'"\', "!", or a '
+            "newline) that cmd.exe cannot pass through ssh's ProxyCommand "
+            "safely. Rename the session or move the key to a path without it.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if not arg:
+        return '""'
+    needs_quoting = any(c.isspace() for c in arg) or any(
+        c in arg for c in _CMD_METACHARS
+    )
+    if not needs_quoting:
+        return arg
+
+    # MSVCRT quoting: wrap in double quotes and double the run of backslashes
+    # that immediately precedes the closing quote, so it is not consumed as an
+    # escape for that quote.
+    parts = ['"']
+    backslashes = 0
+    for c in arg:
+        if c == "\\":
+            backslashes += 1
+            parts.append(c)
+        else:
+            backslashes = 0
+            parts.append(c)
+    parts.append("\\" * backslashes)
+    parts.append('"')
+    return "".join(parts)
+
+
 def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     """Builds the OpenSSH ProxyCommand that bridges this session's WebSocket.
 
@@ -399,7 +461,8 @@ def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
 
     OpenSSH on Windows runs the ProxyCommand through ``cmd.exe``, which does
     not understand POSIX single quotes, so the argv is serialized the way
-    cmd.exe expects; POSIX keeps ``shlex.join``.
+    cmd.exe expects (quoted on whitespace or cmd metacharacters, with unsafe
+    characters rejected); POSIX keeps ``shlex.join``.
     """
     self_cmd = [
         sys.executable,
@@ -413,7 +476,7 @@ def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     if identity:
         self_cmd.extend(["--identity", identity])
     if _is_windows():
-        return subprocess.list2cmdline(self_cmd)
+        return " ".join(_quote_windows_arg(a) for a in self_cmd)
     return shlex.join(self_cmd)
 
 

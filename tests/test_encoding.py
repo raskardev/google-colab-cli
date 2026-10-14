@@ -46,6 +46,8 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "colab_cli"
 FENCED_SOURCES = [
     "commands/execution.py",
     "commands/utility.py",
+    "commands/ssh.py",
+    "commands/automation.py",
     "auth.py",
     "state.py",
     "history.py",
