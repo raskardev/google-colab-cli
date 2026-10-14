@@ -191,7 +191,9 @@ class TestTranslateKeyEvent:
         assert win_console.translate_key_event(True, 1, 0x70, "", 0) == "\x1bOP"
         assert win_console.translate_key_event(True, 1, 0x73, "", 0) == "\x1bOS"
         assert win_console.translate_key_event(True, 1, self.VK_F5, "", 0) == "\x1b[15~"
-        assert win_console.translate_key_event(True, 1, self.VK_F12, "", 0) == "\x1b[24~"
+        assert (
+            win_console.translate_key_event(True, 1, self.VK_F12, "", 0) == "\x1b[24~"
+        )
 
     def test_unmapped_key_returns_empty_string(self):
         assert win_console.translate_key_event(True, 1, 0xFF, "", 0) == ""
@@ -275,7 +277,7 @@ class TestReadKey:
         low = chr(0xDE00)  # U+1F600
         patches = self._patch_reader([[(True, 1, 0, high, 0), (True, 1, 0, low, 0)]])
         with patches[0], patches[1]:
-            assert win_console.read_key() == "\U0001F600"
+            assert win_console.read_key() == "\U0001f600"
 
     def test_unpaired_high_surrogate_dropped_before_next_key(self):
         high = chr(0xD83D)
@@ -289,11 +291,9 @@ class TestReadKey:
         """The two halves may arrive in separate ReadConsoleInputW batches."""
         high = chr(0xD83D)
         low = chr(0xDE00)
-        patches = self._patch_reader(
-            [[(True, 1, 0, high, 0)], [(True, 1, 0, low, 0)]]
-        )
+        patches = self._patch_reader([[(True, 1, 0, high, 0)], [(True, 1, 0, low, 0)]])
         with patches[0], patches[1]:
-            assert win_console.read_key() == "\U0001F600"
+            assert win_console.read_key() == "\U0001f600"
 
     def test_failed_read_returns_none(self):
         patches = self._patch_reader([[]])
@@ -304,8 +304,11 @@ class TestReadKey:
         def raising_read(handle, count):
             raise KeyboardInterrupt
 
-        with patch.object(win_console, "_kernel32", _fake_kernel32_with_stdin()), patch.object(
-            win_console, "_read_console_records", side_effect=raising_read
+        with (
+            patch.object(win_console, "_kernel32", _fake_kernel32_with_stdin()),
+            patch.object(
+                win_console, "_read_console_records", side_effect=raising_read
+            ),
         ):
             assert win_console.read_key() == "\x03"
 

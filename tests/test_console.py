@@ -311,6 +311,64 @@ def test_resize_poller_exits_when_stop_event_set():
     mock_ws.send.assert_not_called()
 
 
+def test_resize_poller_does_not_resend_size_sent_on_open():
+    """Regression: the poller must be initialised with the size on_open
+    already sent, so the first probe does not re-send it."""
+    import colab_cli.console as console_mod
+
+    sizes = iter(
+        [
+            os.terminal_size((80, 24)),  # same as the size sent on open
+            os.terminal_size((120, 40)),
+        ]
+    )
+    stop_event = threading.Event()
+
+    def fake_size():
+        try:
+            return next(sizes)
+        except StopIteration:
+            stop_event.set()
+            return os.terminal_size((120, 40))
+
+    mock_ws = MagicMock()
+    with patch("colab_cli.console.os.get_terminal_size", side_effect=fake_size):
+        console_mod._resize_poller(mock_ws, stop_event, interval=0, last=(80, 24))
+
+    payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert payloads == [{"cols": 120, "rows": 40}]
+
+
+def test_start_resize_poller_passes_current_size_as_baseline():
+    """start_resize_poller seeds the poller with the current terminal size —
+    the same payload on_open has just sent."""
+    import colab_cli.console as console_mod
+
+    captured = {}
+
+    class RecordingThread:
+        def __init__(self, target=None, args=None, daemon=None):
+            captured["args"] = args
+
+        def start(self):
+            pass
+
+    with (
+        patch.object(console_mod.signal, "SIGWINCH", None, create=True),
+        patch("colab_cli.console.threading.Thread", RecordingThread),
+        patch.object(console_mod.sys.stdin, "isatty", return_value=True),
+        patch(
+            "colab_cli.console.os.get_terminal_size",
+            return_value=os.terminal_size((100, 30)),
+        ),
+    ):
+        console_mod.start_resize_poller(MagicMock())
+        try:
+            assert (100, 30) in captured["args"]
+        finally:
+            console_mod.stop_resize_poller()
+
+
 def test_resize_poller_survives_size_query_errors():
     """A failing os.get_terminal_size (e.g. redirected stdin) must not kill
     the poller or send a payload."""
@@ -443,6 +501,30 @@ def test_read_stdin_uses_win_read_key_when_active():
 
     sent = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
     assert sent == [{"data": "l"}, {"data": "s"}, {"data": "\r"}]
+    mock_ws.close.assert_not_called()
+
+
+def test_read_stdin_skips_dropped_win_keys():
+    """Regression: a dropped key from win_console.read_key ("" for an
+    unmapped virtual key) must be skipped, never treated as EOF — previously
+    an empty string broke the loop and the session lost all input."""
+    import colab_cli.console as console_mod
+
+    mock_ws = MagicMock()
+    keys = iter(["", "", "l", "s", "\r", None])
+    with patch.object(
+        console_mod.win_console, "read_key", side_effect=lambda: next(keys)
+    ):
+        console_mod._is_running = True
+        try:
+            console_mod.read_stdin_loop(mock_ws, is_tty=True, use_win_raw=True)
+        finally:
+            console_mod._is_running = False
+
+    sent = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert sent == [{"data": "l"}, {"data": "s"}, {"data": "\r"}]
+    # Only a None (failed console read) ends the loop; the dropped keys did
+    # not, and the socket stays open (the remote shell owns it).
     mock_ws.close.assert_not_called()
 
 

@@ -32,9 +32,9 @@ except ImportError:
     tty = None  # type: ignore
 from urllib.parse import urlparse
 
-from colab_cli import win_console
 import websocket
 
+from colab_cli import win_console
 from colab_cli.state import SessionState
 
 logger = logging.getLogger(__name__)
@@ -87,16 +87,15 @@ def on_close(ws, close_status_code, close_msg):
     stop_resize_poller()
 
 
-def _resize_poller(ws, stop_event, interval=RESIZE_POLL_INTERVAL_SECONDS):
+def _resize_poller(ws, stop_event, interval=RESIZE_POLL_INTERVAL_SECONDS, last=None):
     """Polls the terminal size and forwards it when it changes.
 
     Used on platforms without SIGWINCH (Windows). Every size change —
     including the first successful probe after earlier failures — is
-    forwarded with the same payload as send_terminal_size. The poller is
-    started right after on_open sent the initial size, so a duplicate first
-    send is harmless.
+    forwarded with the same payload as send_terminal_size. ``last`` is the
+    baseline; on_open passes the size it already sent so the poller does not
+    re-send the initial size.
     """
-    last = None
     while not stop_event.is_set():
         try:
             size = os.get_terminal_size()
@@ -135,9 +134,18 @@ def start_resize_poller(ws):
             return
     except Exception:
         return
+    # Baseline with the size on_open has just sent, so the first poll does
+    # not re-send it.
+    try:
+        size = os.get_terminal_size()
+        initial = (size.columns, size.lines)
+    except Exception:
+        initial = None
     _resize_stop_event = threading.Event()
     thread = threading.Thread(
-        target=_resize_poller, args=(ws, _resize_stop_event), daemon=True
+        target=_resize_poller,
+        args=(ws, _resize_stop_event, RESIZE_POLL_INTERVAL_SECONDS, initial),
+        daemon=True,
     )
     thread.start()
 
@@ -163,29 +171,37 @@ def read_stdin_loop(ws, is_tty, use_win_raw=False):
                     # EOF from the Windows console: behave like the POSIX TTY
                     # path (stop reading; the remote shell owns the socket).
                     break
+                if not char:
+                    # Dropped key event (unmapped virtual key, corrupt
+                    # surrogate, ...): skip it but keep the session alive —
+                    # a dropped key must never end the input loop.
+                    continue
+                ws.send(json.dumps({"data": char}))
             else:
                 # Read a single character (or escape sequence byte)
                 char = sys.stdin.read(1)
-            if not char:
-                if not is_tty:
-                    # Piped input has reached EOF. The remote /colab/tty
-                    # endpoint wraps bash in tmux which intercepts \x04
-                    # (Ctrl-D) as a literal character, so it never exits.
-                    # Instead send "exit\n" so bash voluntarily terminates,
-                    # wait a short grace period for the shell's goodbye
-                    # output to drain back to us, then close the websocket
-                    # ourselves to guarantee the client unblocks.
-                    try:
-                        ws.send(json.dumps({"data": "exit\n"}))
-                    except Exception:
-                        pass
-                    time.sleep(PIPED_EOF_GRACE_SECONDS)
-                    try:
-                        ws.close()
-                    except Exception:
-                        pass
-                break
-            ws.send(json.dumps({"data": char}))
+                if not char:
+                    if not is_tty:
+                        # Piped input has reached EOF. The remote /colab/tty
+                        # endpoint wraps bash in tmux which intercepts \x04
+                        # (Ctrl-D) as a literal character, so it never exits.
+                        # Instead send "exit\n" so bash voluntarily terminates,
+                        # wait a short grace period for the shell's goodbye
+                        # output to drain back to us, then close the websocket
+                        # ourselves to guarantee the client unblocks.
+                        try:
+                            ws.send(json.dumps({"data": "exit\n"}))
+                        except Exception:
+                            logger.debug(
+                                "Piped EOF: failed to send exit", exc_info=True
+                            )
+                        time.sleep(PIPED_EOF_GRACE_SECONDS)
+                        try:
+                            ws.close()
+                        except Exception:
+                            logger.debug("Piped EOF: failed to close ws", exc_info=True)
+                    break
+                ws.send(json.dumps({"data": char}))
         except Exception:
             break
 

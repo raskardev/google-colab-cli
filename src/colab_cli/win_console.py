@@ -282,9 +282,7 @@ def read_key():
                     # Combine into the actual astral code point: keeping the
                     # raw UTF-16 pair would break UTF-8 encoding downstream.
                     combined = chr(
-                        0x10000
-                        + ((ord(pending_high) - 0xD800) << 10)
-                        + (code - 0xDC00)
+                        0x10000 + ((ord(pending_high) - 0xD800) << 10) + (code - 0xDC00)
                     )
                     pending_high = ""
                     return combined
