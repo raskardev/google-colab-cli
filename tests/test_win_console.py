@@ -15,7 +15,7 @@
 """Tests for the Windows console raw-mode helpers (unit U8).
 
 These tests must pass on any OS: the Windows-specific low-level calls
-(kernel32 SetConsoleMode/GetConsoleMode, msvcrt.getwch) are mocked so the
+(kernel32 GetConsoleMode/SetConsoleMode/ReadConsoleInputW) are mocked so the
 suite never touches a real console and never blocks on stdin.
 """
 
@@ -364,5 +364,14 @@ class TestModuleImportability:
         """The module must import cleanly on non-Windows (guarded imports)."""
         if sys.platform == "win32":
             pytest.skip("POSIX-only import check")
+        # The guarded Windows-only names stay unset on POSIX.
         assert win_console._kernel32 is None
-        assert win_console.msvcrt is None
+        assert win_console._INPUT_RECORD is None
+        # The pure translator must work without any Windows APIs loaded.
+        assert win_console.translate_key_event(True, 1, 0x26, "\x00", 0) == "\x1b[A"
+        assert win_console.translate_key_event(True, 2, 0, "a", 0) == "aa"
+        # Console setup reports unavailability instead of raising ImportError.
+        with pytest.raises(OSError), win_console.windows_raw_console():
+            pass
+        with pytest.raises(OSError):
+            win_console.read_key()

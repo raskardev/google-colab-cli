@@ -96,7 +96,25 @@ _VK_SEQUENCES = {
 if sys.platform == "win32":
     import ctypes.wintypes
 
-    _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    # Private handle: loading the DLL ourselves (instead of mutating the
+    # process-wide ``ctypes.windll.kernel32``) keeps our argtypes/restypes
+    # from leaking into other libraries that share the cached instance.
+    # Everything below stays inside the ``win32`` guard, so importing the
+    # module on POSIX still works.
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+
+    _kernel32.GetStdHandle.argtypes = [ctypes.wintypes.DWORD]
+    _kernel32.GetStdHandle.restype = ctypes.wintypes.HANDLE
+    _kernel32.GetConsoleMode.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    _kernel32.GetConsoleMode.restype = ctypes.wintypes.BOOL
+    _kernel32.SetConsoleMode.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.wintypes.DWORD,
+    ]
+    _kernel32.SetConsoleMode.restype = ctypes.wintypes.BOOL
 
     class _CHAR_UNION(ctypes.Union):
         _fields_ = [
@@ -127,6 +145,15 @@ if sys.platform == "win32":
             ("EventType", ctypes.wintypes.WORD),
             ("Event", _EVENT_UNION),
         ]
+
+    # Declared after the struct it points to.
+    _kernel32.ReadConsoleInputW.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.POINTER(_INPUT_RECORD),
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    _kernel32.ReadConsoleInputW.restype = ctypes.wintypes.BOOL
 
 else:
     _kernel32 = None  # type: ignore[assignment]
