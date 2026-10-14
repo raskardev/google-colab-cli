@@ -43,6 +43,7 @@ there so callers can fall back to line mode.
 
 import contextlib
 import ctypes
+import ctypes.wintypes  # importable on every platform; only kernel32 is win32-only
 import sys
 
 STD_INPUT_HANDLE = -10
@@ -94,8 +95,6 @@ _VK_SEQUENCES = {
 }
 
 if sys.platform == "win32":
-    import ctypes.wintypes
-
     # Private handle: loading the DLL ourselves (instead of mutating the
     # process-wide ``ctypes.windll.kernel32``) keeps our argtypes/restypes
     # from leaking into other libraries that share the cached instance.
