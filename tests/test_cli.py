@@ -439,7 +439,6 @@ def test_extract_command_names_still_detects_non_alphabetical_order():
     )
     names = _extract_command_names(sample)
     assert names == ["ssh", "run"]
-    assert names != sorted(names)
 
 
 def test_extract_command_names_matches_registered_commands():

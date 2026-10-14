@@ -328,9 +328,8 @@ def test_signal_handlers_skip_missing_sighup(mocker):
 
     mocker.patch.object(_signal, "SIGHUP", None, create=True)
     sigmock = mocker.patch("signal.signal")
-    stopped = []
 
-    ssh_module._install_rm_signal_handlers(lambda: stopped.append(True))
+    ssh_module._install_rm_signal_handlers(lambda: None)
 
     registered = {c.args[0] for c in sigmock.call_args_list}
     assert registered == {_signal.SIGTERM, _signal.SIGINT}

@@ -391,23 +391,15 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
-def _join_command(cmd: list[str]) -> str:
-    """Serializes an argv for the shell that will eventually run it.
-
-    OpenSSH on Windows runs ProxyCommand through ``cmd.exe``, which does not
-    understand POSIX single quotes; ``subprocess.list2cmdline`` emits the
-    double-quote form cmd.exe expects, so paths with spaces survive.
-    """
-    if _is_windows():
-        return subprocess.list2cmdline(cmd)
-    return shlex.join(cmd)
-
-
 def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     """Builds the OpenSSH ProxyCommand that bridges this session's WebSocket.
 
     Re-invoked by the interactive shell in ``--proxy-mode``. The session
     already exists by then, so only ``-s NAME`` (plus identity) is needed.
+
+    OpenSSH on Windows runs the ProxyCommand through ``cmd.exe``, which does
+    not understand POSIX single quotes, so the argv is serialized the way
+    cmd.exe expects; POSIX keeps ``shlex.join``.
     """
     self_cmd = [
         sys.executable,
@@ -420,13 +412,15 @@ def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     ]
     if identity:
         self_cmd.extend(["--identity", identity])
-    return _join_command(self_cmd)
+    if _is_windows():
+        return subprocess.list2cmdline(self_cmd)
+    return shlex.join(self_cmd)
 
 
 def _ssh_base_args(proxy_command: str, identity: Optional[str]) -> list[str]:
     """Builds the shared ``ssh`` invocation (ProxyCommand + hardening)."""
-    # Windows OpenSSH resolves `/dev/null` to a bogus drive-relative path
-    # (e.g. C:\dev\null); `NUL` is the Win32 null device (F11).
+    # Windows OpenSSH resolves `/dev/null` to a bogus drive path; `NUL` is
+    # the Win32 null device (F11).
     known_hosts_null = "NUL" if _is_windows() else "/dev/null"
     args = [
         "ssh",

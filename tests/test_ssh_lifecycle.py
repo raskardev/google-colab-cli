@@ -260,35 +260,17 @@ def test_proxy_mode_rm_teardown_idempotent(mock_common_state, mocker):
 
 def test_proxy_mode_rm_stops_reused_session(mock_common_state, mocker):
     """proxy-mode --rm stops the bridged session on disconnect even when it
-    already existed (ephemeral ~/.ssh/config host)."""
+    already existed (ephemeral ~/.ssh/config host).
+
+    Win32-OpenSSH does not deliver SIGHUP to a ProxyCommand, so the clean
+    pipe-close path (the bridge returning) must tear down too (D4).
+    """
     sess = _make_session("colab")
     mock_common_state.store.get.return_value = sess  # already exists
     mock_common_state.resolve_session.return_value = "colab"
     mocker.patch("signal.signal")
     stop = mocker.patch("colab_cli.commands.session.stop")
-    _patch_proxy(mocker)
-
-    result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "colab", "--rm"])
-    assert result.exit_code == 0
-    stop.assert_called_once_with(session="colab")
-
-
-def test_proxy_mode_rm_teardown_runs_on_pipe_close(mock_common_state, mocker):
-    """Pipe close (stdin EOF) alone must trigger --rm teardown.
-
-    Win32-OpenSSH does not deliver SIGHUP to a ProxyCommand, so on Windows
-    cleanup relies on the bridge returning when the pipe closes; this pins
-    the `finally` path that guarantees it (D4).
-    """
-    sess = _make_session("colab")
-    mock_common_state.store.get.return_value = sess
-    mock_common_state.resolve_session.return_value = "colab"
-    mocker.patch("signal.signal")
-    stop = mocker.patch("colab_cli.commands.session.stop")
-    mocker.patch.object(ssh_module, "_resolve_pubkey", return_value="pk")
-    mocker.patch.object(ssh_module, "_connect_websocket", return_value=MagicMock())
-    # A clean 0 means the pump loop ended on stdin EOF (the pipe closed).
-    mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
+    _patch_proxy(mocker)  # bridge returns 0: stdin EOF / pipe close
 
     result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "colab", "--rm"])
     assert result.exit_code == 0

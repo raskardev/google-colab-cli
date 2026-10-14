@@ -155,9 +155,9 @@ def edit(
 
     _, ext = os.path.splitext(remote_path)
 
-    # mkstemp + close keeps the path re-openable by the editor: Windows locks
-    # a NamedTemporaryFile(delete=True) for as long as our handle is open, so
-    # click.edit() got PermissionError(13) there (F1).
+    # Windows locks a NamedTemporaryFile(delete=True) while our handle is
+    # open, so the editor's own open() failed there; mkstemp + close does not
+    # hold the path open (F1).
     fd, local_path = tempfile.mkstemp(suffix=ext)
     os.close(fd)
     try:

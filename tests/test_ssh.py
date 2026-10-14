@@ -311,6 +311,7 @@ def _parse_proxy_command(cmd: str) -> list[str]:
     return shlex.split(cmd)
 
 
+@pytest.mark.parametrize("on_windows", [True, False], ids=["win32", "posix"])
 @pytest.mark.parametrize(
     ("exe", "name", "identity"),
     [
@@ -324,14 +325,14 @@ def _parse_proxy_command(cmd: str) -> list[str]:
     ],
     ids=["exe-spaces", "backslashes-and-spaces", "single-quote"],
 )
-def test_proxy_command_uses_cmd_quoting_on_windows(mocker, exe, name, identity):
-    """win32 must serialize with `subprocess.list2cmdline`.
+def test_proxy_command_quoting_per_platform(mocker, on_windows, exe, name, identity):
+    """win32 serializes with `subprocess.list2cmdline`, POSIX with `shlex.join`.
 
     OpenSSH on Windows runs ProxyCommand through cmd.exe, which does not
     understand POSIX single quotes; a `sys.executable` with spaces or
-    backslashes must still arrive as one argument.
+    backslashes must still arrive as one argument there.
     """
-    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(ssh_module, "_is_windows", return_value=on_windows)
     mocker.patch.object(sys, "executable", exe)
 
     cmd = ssh_module._proxy_command(_make_session(name=name), identity)
@@ -339,7 +340,11 @@ def test_proxy_command_uses_cmd_quoting_on_windows(mocker, exe, name, identity):
     expected = [exe, "-m", "colab_cli.cli", "ssh", "--proxy-mode", "-s", name]
     if identity:
         expected += ["--identity", identity]
-    assert cmd == subprocess.list2cmdline(expected)
+    if on_windows:
+        assert cmd == subprocess.list2cmdline(expected)
+    else:
+        assert shlex.split(cmd) == expected
+        assert "'" in cmd  # single quoting for /bin/sh
 
 
 @pytest.mark.skipif(
@@ -364,27 +369,6 @@ def test_proxy_command_windows_round_trips_through_cmd(mocker):
         "--identity",
         "/k/id ed25519",
     ]
-
-
-def test_proxy_command_uses_shlex_join_on_posix(mocker):
-    """POSIX keeps `shlex.join` (single quoting for /bin/sh)."""
-    mocker.patch.object(ssh_module, "_is_windows", return_value=False)
-    mocker.patch.object(sys, "executable", "/usr/bin/python3")
-
-    cmd = ssh_module._proxy_command(_make_session(name="a b"), "/k/id ed25519")
-
-    assert shlex.split(cmd) == [
-        "/usr/bin/python3",
-        "-m",
-        "colab_cli.cli",
-        "ssh",
-        "--proxy-mode",
-        "-s",
-        "a b",
-        "--identity",
-        "/k/id ed25519",
-    ]
-    assert "'" in cmd
 
 
 @pytest.mark.parametrize(
