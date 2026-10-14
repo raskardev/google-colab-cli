@@ -7,7 +7,7 @@ Designed to support seamless developer productivity, headless automation, and AI
 [Demo](https://github.com/user-attachments/assets/656226a9-af13-4fdb-8eda-d7de747336a2)
 
 > [!NOTE]
-> **Platform support:** the Colab CLI currently supports **Linux and macOS** only. Windows is not supported at this time.
+> **Platform support:** the Colab CLI supports **Linux, macOS, and Windows** (native Windows 10/11 in PowerShell, `cmd`, and Windows Terminal).
 
 > [!TIP]
 > Looking for in-notebook, interactive agent-assisted coding instead of a terminal workflow? See the [Colab MCP Server](https://github.com/googlecolab/colab-mcp).
@@ -36,6 +36,15 @@ uv tool install google-colab-cli
 # Using pip
 pip install google-colab-cli
 ```
+
+### Windows
+
+`uv tool install google-colab-cli` works as-is in PowerShell, `cmd`, and Windows Terminal.
+
+* **`colab ssh`** needs the OpenSSH client, built into Windows 10/11 (enable it under *Settings → System → Optional features → OpenSSH Client* if missing).
+* **Config & state** live under `%USERPROFILE%\.config\colab-cli` (the same `~/.config` layout as Linux/macOS; override with `--config`).
+* **`colab edit`** opens `%EDITOR%` if set, otherwise `notepad` — note that Notepad saves CRLF line endings.
+* **`colab run` without shebangs**: `cmd` and PowerShell do not honor `#!/usr/bin/env -S colab run`. Run `colab run script.py args...` directly, or put [`examples/colabrun.cmd`](examples/colabrun.cmd) on your `PATH` and use `colabrun script.py args...`.
 
 ---
 
@@ -170,6 +179,8 @@ print("Device Name:", torch.cuda.get_device_name(0))
 ```
 
 Make the script executable (`chmod +x script.py`) and run it: `./script.py`. The `--keep` option tells the CLI to preserve the session VM on completion so you can re-execute or inspect logs.
+
+On Windows, `cmd` and PowerShell do not honor shebangs. Run `colab run script.py args...` directly, or put [`examples/colabrun.cmd`](examples/colabrun.cmd) on your `PATH` and run `colabrun script.py args...`.
 
 ---
 

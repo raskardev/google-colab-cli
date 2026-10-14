@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-15: Windows support for `colab ssh`. OpenSSH on Windows runs the `ProxyCommand` through `cmd.exe`, which does not understand the POSIX single quotes `shlex.join` produces, so the command is now serialized per platform: arguments are double-quoted with MSVCRT rules when they contain whitespace or the cmd metacharacters `&|^<>()`, and arguments containing `%`, `"`, `!`, or CR/LF are rejected up front with an actionable error because `cmd.exe` cannot carry them through. `UserKnownHostsFile` uses the `NUL` null device on Windows (Win32 OpenSSH resolved `/dev/null` to a bogus drive path), while POSIX keeps `/dev/null`. `--rm` teardown no longer crashes on Windows: `signal.SIGHUP` is looked up defensively and the cleanup then relies on `SIGTERM`/`SIGINT` plus the pipe closing (Win32 OpenSSH does not send SIGHUP to a ProxyCommand). Public-key files under `~/.ssh` are now read with `encoding="utf-8"`.
 2026-09-25: Cleaned up keep-alive daemon references in session creation and teardown documentation.
 2026-08-09: Added `--high-mem` passthrough when `colab ssh` auto-creates a runtime (forwards to `colab new --high-mem`).
 2026-07-17: Initial design and implementation of `colab ssh` — client side of SSH-over-WebSocket runtime access. Adds three modes (interactive shell, `-s SESSION`, and `--proxy-mode` OpenSSH ProxyCommand bridge), `--identity/-i` key selection, and per-HTTP-status handshake error messages. Server side is out of scope for this repo; the subcommand is a no-op against runtimes that do not expose the `/colab/ssh` endpoint (surfaces an actionable HTTP 404 message).
@@ -53,6 +54,14 @@ where a bare `colab` may not be on `PATH`. External SSH tools run their own
 remote command, so to also land in `/content` add `RequestTTY yes` and
 `RemoteCommand cd /content 2>/dev/null; exec bash -l`.
 
+On Windows the `ProxyCommand` line is executed by `cmd.exe`, so `colab ssh`
+serializes it with cmd-compatible quoting (double quotes, including for the
+metacharacters `&|^<>()`). Arguments containing `%`, `"`, `!`, or a newline
+cannot be represented safely and are rejected with a clear error — rename the
+session or move the key to a path without those characters. The bundled
+`ssh` invocation also sets `UserKnownHostsFile=NUL` on Windows (the Win32 null
+device; `/dev/null` would be treated as a drive-relative path).
+
 ## Behavior
 
 1. **Session resolution / auto-create**: With `-s NAME`, resolves that session
@@ -79,10 +88,13 @@ remote command, so to also land in `/content` add `RequestTTY yes` and
    this must survive how OpenSSH ends a `ProxyCommand`: on disconnect it sends
    **SIGHUP** (verified), not just stdin EOF, and Python's default SIGHUP action
     would terminate the process before the teardown `finally` ran — leaking the
-    runtime. `--rm` therefore installs
+   runtime. `--rm` therefore installs
    SIGHUP/SIGTERM/SIGINT handlers that run the stop, idempotent with the
-   `finally`. `SIGKILL` cannot be intercepted, so a `kill -9`/hard crash can
-   still leak; a normal disconnect is SIGHUP and is handled.
+   `finally`. Windows has no `SIGHUP` (the handler is skipped) and Win32 OpenSSH
+   does not send one to a `ProxyCommand`, so teardown there lands via
+   `SIGTERM`/`SIGINT` or the pipe closing. `SIGKILL` cannot be intercepted, so a
+   `kill -9`/hard crash can still leak; a normal disconnect is SIGHUP and is
+   handled.
 6. **Error handling**: The WebSocket upgrade maps each common HTTP status to an
    actionable message:
 

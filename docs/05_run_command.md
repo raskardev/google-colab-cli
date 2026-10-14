@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-15: Documented the Windows alternative to shebang execution. `cmd.exe` and PowerShell do not honor `#!/usr/bin/env -S colab run`, so on Windows run `colab run script.py args...` directly or place the `examples/colabrun.cmd` shim (`colab run %*`) on `PATH` and invoke `colabrun script.py args...`. `colab run` itself already accepts scripts without a shebang line.
 2026-09-25: Removed keep-alive daemon spawning from session allocation and teardown. `--keep` remains supported and skips unassignment on completion.
 2026-08-09: Added `--high-mem` flag (passthrough to session creation; sends `shape=hm` on assign when supported).
 2026-05-12: Initial design and implementation of `colab run <script.py> [args...]`. Combines `colab new` + `colab exec` + `colab stop` into a single fire-and-forget invocation so a Python file can use `#!/usr/bin/env -S colab run` as a shebang line and execute on a freshly-allocated Colab VM. Adds `--keep` (skip auto-stop), `--gpu` / `--tpu` (passthrough to session creation), `-s/--session` (name the ephemeral session), and propagates the script's exit status (non-zero on any uncaught exception in the kernel). The script's `sys.argv` is re-set inside the kernel to mirror native `python script.py arg1 arg2` semantics, and `__name__` is set to `"__main__"`.
@@ -47,6 +48,8 @@ print(torch.cuda.get_device_name(0))
 `chmod +x` and `./script.py` is then a single-step "rent a GPU, run, return".
 
 > The `-S` flag of `env` is necessary on Linux/macOS to allow multiple words after `colab run` in a shebang line; without it the kernel passes the whole tail as one argument.
+>
+> **Windows:** `cmd.exe` and PowerShell do not execute shebangs. Use `colab run script.py args...` directly, or install [`examples/colabrun.cmd`](../examples/colabrun.cmd) (contents: `@echo off` / `colab run %*`) somewhere on `PATH` and call `colabrun script.py args...`. Scripts with a shebang line still work, because `colab run` strips it before execution.
 
 ## Behavior
 

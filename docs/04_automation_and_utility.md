@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-15: `colab update --install` is now supported on Windows. `is_self_install_supported()` includes `Windows`, and the `uv tool` detection normalises backslashes and matches the `uv`/`tools` path components, so a `%APPDATA%\uv\tools\...` interpreter upgrades with `uv tool install -U` while everything else falls back to `pip`. Also added explicit `encoding="utf-8"` to the OAuth client-config and cached-token reads/writes and a best-effort `chmod 0o600` on the cached OAuth token on POSIX (no-op on Windows, whose profile ACLs are already private).
 2026-09-25: Cleaned up references to keep-alive background daemon and pre-flight pings. VM liveness is automatically maintained by the Colab backend based on active kernel activity.
 2026-08-10: Added `colab usage` for account-level compute-unit rate/balance via `GET /tun/m/ccu-info` on the session backend (same bearer token as `colab new`).
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
@@ -199,17 +200,21 @@ How each provider supplies the scope:
             the cache.
 -   **Notification**: If a new version is found, a non-intrusive message is
     printed to the console with a `Run 'pip install --upgrade google-colab-cli' to
-    update.` hint. On Linux and macOS platforms where `--install` self-update is supported,
+    update.` hint. On Linux, macOS, and Windows platforms where `--install` self-update is supported,
     an additional hint `You can run 'colab update --install' to upgrade in place.`
     is displayed above the pip/uv install command. The cached banner shown between
     fetches uses the generic `Run 'colab update' to update.` hint.
 -   **Self-install (`--install`)**: An opt-in `--install` flag (default
-    `False`) makes `colab update` upgrade the CLI in place (**Linux and macOS**).
+    `False`) makes `colab update` upgrade the CLI in place (**Linux, macOS, and Windows**).
     It detects how the CLI was installed:
-    - If `sys.executable` contains `/uv/tools` (indicating it was installed via
-      `uv tool install`), it runs `uv tool install -U google-colab-cli`.
+    - If `sys.executable` lives under a `uv`/`tools` path prefix (the layout
+      `uv tool install` produces on every platform, including
+      `%APPDATA%\uv\tools\...` on Windows), it runs
+      `uv tool install -U google-colab-cli`.
     - Otherwise, runs `pip install -U google-colab-cli` using `sys.executable`
-      to ensure the upgrade lands in the same interpreter.
+      to ensure the upgrade lands in the same interpreter. On Windows this can
+      fail while the running `colab.exe` is locked; retry from a fresh shell or
+      use `uv tool install -U google-colab-cli`.
     On other platforms, the command exits non-zero with an explanatory
     message. When the cached `latest_version` is already at or below the
     current install, the flag is a silent no-op so it is safe to wire into

@@ -17,6 +17,22 @@ End-to-end tests that run against a **live Colab backend** (unlike the mocked un
 | `repro_piped_console/` | Fast smoke test (~5s including session creation): `echo cmd \| colab console -s s` runs the command and exits within 30s. Regression test for the 2026-05-07 EOF-handler fix. |
 | `repro_bundled_oauth/` | Fast smoke test (~5s): verifies that the fallback OAuth configuration is loaded and starts the OAuth flow with the default client ID when local config is missing. |
 | `repro_ssh/` | Fast smoke test (~5s): `--help` advertises the flags and an unknown session exits. Slow soak test (~95s): Live e2e allocates a CPU VM, runs a real remote command over `colab ssh --proxy-mode` |
+| `repro_windows_console_raw/` | **Manual** Windows test for `colab console` raw input/resize; follow `MANUAL_STEPS.md` (cannot be automated). |
+
+
+## Windows
+
+The `*.sh` scenarios must run under **Git Bash**. Invoke them from a Git Bash shell, or from PowerShell
+whenever Git's `bash` is on `PATH`:
+
+```powershell
+uv run bash integration/repro_run_command/test.sh
+```
+
+`repro_ssh` additionally needs the OpenSSH client. The raw-console behaviour of `colab console` cannot be
+automated: run the manual checklist in
+[`repro_windows_console_raw/MANUAL_STEPS.md`](repro_windows_console_raw/MANUAL_STEPS.md) in a real Windows
+Terminal or conhost window.
 
 
 ## Running
