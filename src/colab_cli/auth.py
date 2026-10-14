@@ -98,11 +98,9 @@ def _run_remote_flow(client_config: dict) -> Credentials:
 def _restrict_token_permissions(path: str, *, posix: bool | None = None) -> None:
     """Best-effort ``chmod 0o600`` on the cached OAuth token (POSIX only).
 
-    The token file holds a long-lived refresh token. On POSIX nothing prevents
-    a world-readable ``~/.config/colab-cli/token.json``, so tighten it to the
-    owner. On Windows ``os.chmod`` only toggles the read-only bit and the file
-    already inherits the (private by default) profile ACLs, so this is a no-op;
-    ``posix`` exists purely so tests can exercise both branches explicitly.
+    The token holds a long-lived refresh token. On Windows ``os.chmod`` only
+    toggles the read-only bit and the file already inherits private profile
+    ACLs, so this is a no-op; ``posix`` lets tests exercise both branches.
     """
     if posix is None:
         posix = os.name == "posix"

@@ -30,11 +30,9 @@ runner = CliRunner()
 def prompt_toolkit_dummy_io():
     """Run every REPL test against a dummy prompt_toolkit app session.
 
-    Under pytest, ``sys.stdout`` is captured and is not a Win32 console, so
-    constructing ``PromptSession()`` raises ``NoConsoleScreenBufferError`` on
-    Windows (POSIX silently degrades to a dumb output). Injecting a pipe input
-    and ``DummyOutput`` keeps these tests platform-agnostic without touching
-    production code. See unit U5 of docs/plans/windows-support.md.
+    Under pytest, captured ``sys.stdout`` is not a Win32 console, so
+    ``PromptSession()`` raises ``NoConsoleScreenBufferError`` on Windows.
+    A pipe input and ``DummyOutput`` keep these tests platform-agnostic.
     """
     with (
         create_pipe_input() as pipe_input,

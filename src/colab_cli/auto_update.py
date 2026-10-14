@@ -54,11 +54,8 @@ def is_self_install_supported() -> bool:
 def _is_uv_tool_install(executable: str | None = None) -> bool:
     """Return True when ``executable`` lives under a ``uv tool`` install prefix.
 
-    Matches on path components (``uv`` immediately followed by ``tools``)
-    instead of a POSIX substring, so the Windows layout
-    (``%APPDATA%\\uv\\tools\\<name>\\Scripts\\python.exe``) is detected too.
-    Backslashes are normalised first so the check behaves identically on every
-    host, and the comparison is case-insensitive (Windows paths are).
+    Matches the path components ``uv``/``tools`` (backslash-normalised and
+    case-insensitive) so the Windows layout is detected too.
     """
     exe = executable if executable is not None else sys.executable
     if not exe:
@@ -253,7 +250,6 @@ def run_background_check() -> None:
 def self_install() -> None:
     """Upgrade the CLI in place, detecting uv vs pip."""
     if _is_uv_tool_install():
-        # Installed via `uv tool install`; let uv replace the tool environment.
         cmd = ["uv", "tool", "install", "-U", PYPI_PACKAGE_NAME]
     else:
         cmd = [sys.executable, "-m", "pip", "install", "-U", PYPI_PACKAGE_NAME]
