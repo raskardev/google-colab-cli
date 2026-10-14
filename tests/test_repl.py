@@ -12,15 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch, ANY
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from typer.testing import CliRunner
 
 from colab_cli.cli import app
 from colab_cli.repl import ColabREPL
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def prompt_toolkit_dummy_io():
+    """Run every REPL test against a dummy prompt_toolkit app session.
+
+    Under pytest, ``sys.stdout`` is captured and is not a Win32 console, so
+    constructing ``PromptSession()`` raises ``NoConsoleScreenBufferError`` on
+    Windows (POSIX silently degrades to a dumb output). Injecting a pipe input
+    and ``DummyOutput`` keeps these tests platform-agnostic without touching
+    production code. See unit U5 of docs/plans/windows-support.md.
+    """
+    with (
+        create_pipe_input() as pipe_input,
+        create_app_session(input=pipe_input, output=DummyOutput()),
+    ):
+        yield
 
 
 @pytest.fixture

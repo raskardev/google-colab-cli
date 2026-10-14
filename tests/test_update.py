@@ -193,15 +193,14 @@ def test_pypi_upgrade_uses_pip_hint_windows(
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
-    mocker.patch("sys.executable", "/usr/bin/python")
+    mocker.patch("sys.executable", "C:\\Python312\\python.exe")
     mocker.patch("colab_cli.auto_update.platform.system", return_value="Windows")
 
     result = runner.invoke(app, ["update"])
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
-    assert (
-        "You can run 'colab update --install' to upgrade in place." not in result.output
-    )
+    # Windows is a supported platform for self-install since U7.
+    assert "You can run 'colab update --install' to upgrade in place." in result.output
     assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
 
 
@@ -516,18 +515,46 @@ def test_install_flag_runs_uv_tool_install(
 def test_install_flag_errors_on_unsupported_platform(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`--install` is gated to Linux and macOS; on other platforms the command must
-    exit non-zero with an explanatory message and skip the pip subprocess."""
+    """`--install` is gated to Linux, macOS, and Windows; on other platforms
+    the command must exit non-zero with an explanatory message and skip the
+    pip subprocess."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
-    mocker.patch("colab_cli.auto_update.platform.system", return_value="Windows")
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="FreeBSD")
     run = mocker.patch("colab_cli.auto_update.subprocess.run")
 
     result = runner.invoke(app, ["update", "--install"])
     assert result.exit_code != 0
     assert run.call_count == 0
-    assert "only supported on Linux and macOS" in result.output
+    assert "self-install" in result.output
+
+
+def test_install_flag_runs_on_windows(mocker, app_version, fake_settings, mock_pypi):
+    """`colab update --install` is no longer rejected on Windows (U7): it runs
+    the pip fallback through the current interpreter."""
+    app_version("1.0.0")
+    mock_pypi({"info": {"version": "1.1.0"}})
+    fake_settings()
+    mocker.patch("colab_cli.auto_update.platform.system", return_value="Windows")
+    mocker.patch("sys.executable", "C:\\Python312\\python.exe")
+    run = mocker.patch(
+        "colab_cli.auto_update.subprocess.run",
+        return_value=mocker.Mock(returncode=0),
+    )
+
+    result = runner.invoke(app, ["update", "--install"])
+    assert result.exit_code == 0, result.output
+    assert run.call_count == 1
+    args, _ = run.call_args
+    assert args[0] == [
+        "C:\\Python312\\python.exe",
+        "-m",
+        "pip",
+        "install",
+        "-U",
+        "google-colab-cli",
+    ]
 
 
 def test_install_flag_runs_on_macos(mocker, app_version, fake_settings, mock_pypi):

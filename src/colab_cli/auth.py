@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import enum
 import json
 import logging
@@ -94,20 +95,37 @@ def _run_remote_flow(client_config: dict) -> Credentials:
     return flow.credentials
 
 
+def _restrict_token_permissions(path: str, *, posix: bool | None = None) -> None:
+    """Best-effort ``chmod 0o600`` on the cached OAuth token (POSIX only).
+
+    The token file holds a long-lived refresh token. On POSIX nothing prevents
+    a world-readable ``~/.config/colab-cli/token.json``, so tighten it to the
+    owner. On Windows ``os.chmod`` only toggles the read-only bit and the file
+    already inherits the (private by default) profile ACLs, so this is a no-op;
+    ``posix`` exists purely so tests can exercise both branches explicitly.
+    """
+    if posix is None:
+        posix = os.name == "posix"
+    if not posix:
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+
+
 def _get_google_auth_credentials(config_path: str) -> Credentials:
     """
     Retrieves credentials using standard public OAuth2 flow.
     """
     client_config = None
     if os.path.exists(config_path):
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             client_config = json.load(f)
     else:
         # Last resort: try inlined config
         try:
             config_resource = resources.files("colab_cli").joinpath("oauth_config.json")
             if config_resource.is_file():
-                client_config = json.loads(config_resource.read_text())
+                client_config = json.loads(config_resource.read_text(encoding="utf-8"))
         except Exception as e:
             logger.debug(f"Failed to load inlined config: {e}")
 
@@ -143,10 +161,12 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
 
         # Save the credentials for the next run
         try:
-            with open(TOKEN_CONFIG_PATH, "w") as token_file:
+            with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as token_file:
                 token_file.write(creds.to_json())
         except Exception as e:
             logger.error(f"Failed to save token to {TOKEN_CONFIG_PATH}: {e}")
+        else:
+            _restrict_token_permissions(TOKEN_CONFIG_PATH)
 
     return creds
 
