@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
@@ -380,9 +381,13 @@ def test_cli_help():
 
 
 def _extract_command_names(help_output: str) -> list[str]:
-    """Parse the command list out of a Typer/Click help output rendered
-    inside the `╭─ Commands ─...` rich box. Returns names in the order they
-    appear.
+    """Parse the command-name column out of a Typer/Click rich help box.
+
+    Rich renders a two-column table: a command entry starts one space after
+    the box border, while a wrapped description continues on a line whose
+    name column is blank (so it is indented by two or more spaces). Anchoring
+    on that single leading space keeps wrapped description words such as
+    "VM" out of the result regardless of platform or terminal width (F14).
     """
     lines = help_output.splitlines()
     in_commands = False
@@ -391,18 +396,65 @@ def _extract_command_names(help_output: str) -> list[str]:
         if "Commands" in line and ("─" in line or "-" in line):
             in_commands = True
             continue
-        if in_commands:
-            stripped = line.strip()
+        if not in_commands:
+            continue
+        stripped = line.strip()
+        if not stripped.startswith("│"):
             if stripped.startswith("╰") or stripped.startswith("`"):
                 break
-            # Lines look like:  "│ help        Show help for a command. │"
-            # Strip the rich box characters.
-            inner = stripped.strip("│").strip()
-            if not inner:
-                continue
-            tok = inner.split()[0]
-            names.append(tok)
+            continue
+        # Lines look like:  "│ help        Show help for a command. │"
+        # Command rows are "│ name  description"; continuation rows are
+        # "│       wrapped description".
+        inner = stripped[1:]
+        if inner.endswith("│"):
+            inner = inner[:-1]
+        if not inner.strip():
+            continue
+        if inner.startswith("  "):
+            continue
+        names.append(inner.split()[0])
     return names
+
+
+def test_extract_command_names_ignores_wrapped_description_words():
+    """F14: wrapped description words (e.g. "VM") are not command names."""
+    sample = (
+        "┌─ Commands ─────────────────────────────────────────────┐\n"
+        "│ run             Run a Python script on a fresh Colab   \n"
+        "│                 VM, then release it                    \n"
+        "│ ssh             Connect to a Colab runtime via SSH.    \n"
+        "└────────────────────────────────────────────────────────┘\n"
+    )
+    assert _extract_command_names(sample) == ["run", "ssh"]
+
+
+def test_extract_command_names_still_detects_non_alphabetical_order():
+    """The parser must still surface a genuine ordering regression."""
+    sample = (
+        "┌─ Commands ─────────────────────────────────────────────┐\n"
+        "│ ssh             Connect to a runtime.                  \n"
+        "│ run             Run a script.                          \n"
+        "└────────────────────────────────────────────────────────┘\n"
+    )
+    names = _extract_command_names(sample)
+    assert names == ["ssh", "run"]
+
+
+def test_extract_command_names_matches_registered_commands():
+    """Every non-hidden registered command appears exactly once in --help."""
+    import typer.main
+
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    names = _extract_command_names(result.output)
+    registered = {
+        name
+        for name, cmd in typer.main.get_command(app).commands.items()
+        if not getattr(cmd, "hidden", False)
+    }
+    assert set(names) == registered
+    assert len(names) == len(set(names))
 
 
 def test_cli_help_commands_sorted_alphabetically():
@@ -566,6 +618,65 @@ def test_cli_edit_with_changes(
     mock_contents_class.return_value.download.assert_called_once()
     mock_contents_class.return_value.upload.assert_called_once()
     assert "Edited and uploaded 'remote.txt'" in result.output
+
+
+@patch("colab_cli.commands.files.ContentsClient")
+@patch("click.edit")
+def test_cli_edit_tempfile_is_reopenable_and_cleaned_up(
+    mock_edit, mock_contents_class, mock_store, mock_common_state
+):
+    """Regression (Windows): `edit` must not hold the temp file open.
+
+    A ``NamedTemporaryFile(delete=True)`` keeps the file locked on Windows, so
+    a second ``open()`` (which is exactly what the editor does) fails with
+    ``PermissionError``. The temp file must also be unlinked once the command
+    returns.
+    """
+    mock_store.get.return_value = MagicMock()
+    mock_common_state.resolve_session.return_value = "s1"
+
+    seen = {}
+
+    def mock_edit_side_effect(filename, **kwargs):
+        seen["path"] = filename
+        assert os.path.isfile(filename)
+        # A second handle must be obtainable while `edit` is on the stack.
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write("new content")
+
+    mock_edit.side_effect = mock_edit_side_effect
+
+    result = runner.invoke(app, ["edit", "-s", "s1", "remote.txt"])
+
+    assert result.exit_code == 0
+    assert seen["path"]
+    mock_contents_class.return_value.upload.assert_called_once()
+    assert not os.path.exists(seen["path"]), "temp file left behind"
+
+
+@patch("colab_cli.commands.files.ContentsClient")
+@patch("click.edit")
+def test_cli_edit_cleans_up_tempfile_on_editor_failure(
+    mock_edit, mock_contents_class, mock_store, mock_common_state
+):
+    """The temp file is removed even when the editor raises."""
+    mock_store.get.return_value = MagicMock()
+    mock_common_state.resolve_session.return_value = "s1"
+
+    seen = {}
+
+    def mock_edit_side_effect(filename, **kwargs):
+        seen["path"] = filename
+        raise RuntimeError("editor died")
+
+    mock_edit.side_effect = mock_edit_side_effect
+
+    result = runner.invoke(app, ["edit", "-s", "s1", "remote.txt"])
+
+    assert result.exit_code != 0
+    assert seen["path"]
+    assert not os.path.exists(seen["path"]), "temp file left behind"
+    mock_contents_class.return_value.upload.assert_not_called()
 
 
 def _make_400_error(message="Bad Request"):

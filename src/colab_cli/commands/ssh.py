@@ -92,9 +92,7 @@ def _pubkey_from_identity(identity: str) -> str:
         raise typer.Exit(code=2)
     pubkey = res.stdout.strip()
     if not pubkey:
-        typer.echo(
-            f"[colab] ssh-keygen produced no key for {identity}.", err=True
-        )
+        typer.echo(f"[colab] ssh-keygen produced no key for {identity}.", err=True)
         raise typer.Exit(code=2)
     return pubkey
 
@@ -121,7 +119,7 @@ def _resolve_pubkey(identity: Optional[str]) -> str:
     for name in _KEY_TYPES:
         candidate = ssh_dir / name
         if candidate.exists():
-            return candidate.read_text().strip()
+            return candidate.read_text(encoding="utf-8").strip()
     typer.echo(
         "[colab] no SSH public key found in ~/.ssh/. Run "
         "`ssh-keygen -t ed25519` to generate one, or pass --identity.",
@@ -388,11 +386,83 @@ def _bridge_proxy_mode(ws: websocket.WebSocket) -> int:
     return 0
 
 
+def _is_windows() -> bool:
+    """True on Windows. Kept as a function so tests can patch the platform."""
+    return sys.platform == "win32"
+
+
+# cmd.exe expands `%VAR%` and swallows `!` (delayed expansion), and a literal
+# `"` cannot be represented inside a quoted argument; a newline/CR would end the
+# command. None of these can be carried safely, so the command is refused.
+_CMD_UNSAFE_CHARS = '%"!\r\n'
+# Characters cmd.exe interprets itself: they must be quoted even when the
+# argument contains no whitespace (`x&calc` would otherwise be chained).
+_CMD_METACHARS = "&|^<>()"
+
+
+def _quote_windows_arg(arg: str) -> str:
+    """Serializes one argv entry for a cmd.exe command line.
+
+    ``subprocess.list2cmdline`` only quotes on whitespace/tabs, so it leaves
+    cmd.exe metacharacters (`&`, `|`, `^`, `<`, `>`, `(`, `)`) bare. Such
+    arguments are force-quoted using the MSVCRT rules (backslashes that
+    precede the closing quote are doubled) so the receiving process re-parses
+    the exact original value. Plain arguments are left unquoted.
+
+    Args:
+      arg: One already-split argv entry.
+
+    Returns:
+      The argument, quoted if needed.
+
+    Raises:
+      typer.Exit: If the argument contains a character cmd.exe cannot carry
+        safely (`%`, `"`, `!`, CR/LF) (exit code 2).
+    """
+    if any(c in arg for c in _CMD_UNSAFE_CHARS):
+        typer.echo(
+            f'[colab] {arg!r} contains a character ("%", \'"\', "!", or a '
+            "newline) that cmd.exe cannot pass through ssh's ProxyCommand "
+            "safely. Rename the session or move the key to a path without it.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if not arg:
+        return '""'
+    needs_quoting = any(c.isspace() for c in arg) or any(
+        c in arg for c in _CMD_METACHARS
+    )
+    if not needs_quoting:
+        return arg
+
+    # MSVCRT quoting: wrap in double quotes and double the run of backslashes
+    # that immediately precedes the closing quote, so it is not consumed as an
+    # escape for that quote.
+    parts = ['"']
+    backslashes = 0
+    for c in arg:
+        if c == "\\":
+            backslashes += 1
+            parts.append(c)
+        else:
+            backslashes = 0
+            parts.append(c)
+    parts.append("\\" * backslashes)
+    parts.append('"')
+    return "".join(parts)
+
+
 def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     """Builds the OpenSSH ProxyCommand that bridges this session's WebSocket.
 
     Re-invoked by the interactive shell in ``--proxy-mode``. The session
     already exists by then, so only ``-s NAME`` (plus identity) is needed.
+
+    OpenSSH on Windows runs the ProxyCommand through ``cmd.exe``, which does
+    not understand POSIX single quotes, so the argv is serialized the way
+    cmd.exe expects (quoted on whitespace or cmd metacharacters, with unsafe
+    characters rejected); POSIX keeps ``shlex.join``.
     """
     self_cmd = [
         sys.executable,
@@ -405,11 +475,16 @@ def _proxy_command(session: SessionState, identity: Optional[str]) -> str:
     ]
     if identity:
         self_cmd.extend(["--identity", identity])
+    if _is_windows():
+        return " ".join(_quote_windows_arg(a) for a in self_cmd)
     return shlex.join(self_cmd)
 
 
 def _ssh_base_args(proxy_command: str, identity: Optional[str]) -> list[str]:
     """Builds the shared ``ssh`` invocation (ProxyCommand + hardening)."""
+    # Windows OpenSSH resolves `/dev/null` to a bogus drive path; `NUL` is
+    # the Win32 null device (F11).
+    known_hosts_null = "NUL" if _is_windows() else "/dev/null"
     args = [
         "ssh",
         "-o",
@@ -417,7 +492,7 @@ def _ssh_base_args(proxy_command: str, identity: Optional[str]) -> list[str]:
         "-o",
         "StrictHostKeyChecking=no",
         "-o",
-        "UserKnownHostsFile=/dev/null",
+        f"UserKnownHostsFile={known_hosts_null}",
         "-o",
         "LogLevel=ERROR",
     ]
@@ -478,9 +553,7 @@ def _select_proxy_session(
     """
     if session and not _session_exists(session):
         with contextlib.redirect_stdout(sys.stderr):
-            return _auto_create_session(
-                gpu, tpu, name=session, high_mem=high_mem
-            ), True
+            return _auto_create_session(gpu, tpu, name=session, high_mem=high_mem), True
     return _resolve_session(session), False
 
 
@@ -542,16 +615,19 @@ def _install_rm_signal_handlers(do_rm: Callable[[], None]) -> None:
         do_rm()
         os._exit(0)
 
-    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+    # SIGHUP is the usual ProxyCommand-disconnect signal on POSIX but does not
+    # exist on Windows, where cleanup relies on SIGTERM/SIGINT and the pipe
+    # closing (F2).
+    for sig in (getattr(signal, "SIGHUP", None), signal.SIGTERM, signal.SIGINT):
+        if sig is None:
+            continue
         try:
             signal.signal(sig, _on_signal)
         except (ValueError, OSError):
             pass  # e.g. not running in the main thread
 
 
-def _run_proxy_bridge(
-    s: SessionState, identity: Optional[str], rm: bool
-) -> int:
+def _run_proxy_bridge(s: SessionState, identity: Optional[str], rm: bool) -> int:
     """Runs the ``--proxy-mode`` WebSocket-stdio bridge, honoring ``--rm``.
 
     Args:

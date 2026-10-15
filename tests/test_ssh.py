@@ -144,9 +144,7 @@ def test_resolve_pubkey_default_scan_key_order(
     if present:
         content = f"ssh-key-content-for-{present}\n"
         (ssh_dir / present).write_text(content)
-    monkeypatch.setattr(
-        "os.path.expanduser", lambda p: p.replace("~", str(fake_home))
-    )
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~", str(fake_home)))
     if expect_found:
         assert ssh_module._resolve_pubkey(None) == content.strip()
     else:
@@ -279,6 +277,218 @@ def test_bridge_proxy_mode_pumps_stdin_to_ws(mocker):
     ws.close.assert_called()
 
 
+# --- ProxyCommand platform quoting (U3) --------------------------------------
+
+_WIN_EXE = r"C:\Program Files\Python312\python.exe"
+
+
+def _shell32_argv(cmdline: str) -> list[str]:
+    """Parse a command line with shell32's ``CommandLineToArgvW``.
+
+    Not a valid oracle for trailing-backslash cases: shell32 parsing
+    diverges from the MSVCRT parser there.
+    """
+    import ctypes
+
+    shell32 = ctypes.WinDLL("shell32")
+    kernel32 = ctypes.WinDLL("kernel32")
+    shell32.CommandLineToArgvW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    argc = ctypes.c_int(0)
+    argv = shell32.CommandLineToArgvW(cmdline, ctypes.byref(argc))
+    try:
+        return [argv[i] for i in range(argc.value)]
+    finally:
+        kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+
+
+def _parse_proxy_command(cmd: str) -> list[str]:
+    """Parse a ProxyCommand the way the platform's shell would."""
+    if sys.platform == "win32":
+        return _shell32_argv(cmd)
+    return shlex.split(cmd)
+
+
+@pytest.mark.parametrize("on_windows", [True, False], ids=["win32", "posix"])
+@pytest.mark.parametrize(
+    ("exe", "name", "identity"),
+    [
+        (_WIN_EXE, "plain", None),
+        (
+            r"C:\Users\Alex\AppData\Local\Programs\Python\python.exe",
+            "a b",
+            r"C:\keys\id ed25519",
+        ),
+        (r"C:\tools\py.exe", "a'b", "/k/id ed25519"),
+    ],
+    ids=["exe-spaces", "backslashes-and-spaces", "single-quote"],
+)
+def test_proxy_command_quoting_per_platform(mocker, on_windows, exe, name, identity):
+    """win32 serializes with `subprocess.list2cmdline`, POSIX with `shlex.join`.
+
+    OpenSSH on Windows runs ProxyCommand through cmd.exe, which does not
+    understand POSIX single quotes; a `sys.executable` with spaces or
+    backslashes must still arrive as one argument there.
+    """
+    mocker.patch.object(ssh_module, "_is_windows", return_value=on_windows)
+    mocker.patch.object(sys, "executable", exe)
+
+    cmd = ssh_module._proxy_command(_make_session(name=name), identity)
+
+    expected = [exe, "-m", "colab_cli.cli", "ssh", "--proxy-mode", "-s", name]
+    if identity:
+        expected += ["--identity", identity]
+    if on_windows:
+        assert cmd == subprocess.list2cmdline(expected)
+    else:
+        assert shlex.split(cmd) == expected
+        assert "'" in cmd  # single quoting for /bin/sh
+
+
+@pytest.mark.parametrize(
+    ("exe", "name", "quoted"),
+    [
+        (r"C:\tools\py.exe", "a&b", '"a&b"'),
+        (r"C:\tools\py.exe", "a|b", '"a|b"'),
+        (r"C:\tools\py.exe", "a(b)", '"a(b)"'),
+        (r"C:\tools\py.exe", "a^b", '"a^b"'),
+        (r"C:\tools\py.exe", "a<b>c", '"a<b>c"'),
+        (
+            r"C:\Program Files (x86)\Python\python.exe",
+            "plain",
+            r'"C:\Program Files (x86)\Python\python.exe"',
+        ),
+        (
+            "C:\\Program Files (x86)\\Python\\",
+            "plain",
+            r'"C:\Program Files (x86)\Python\\"',
+        ),
+    ],
+    ids=[
+        "ampersand",
+        "pipe",
+        "parens",
+        "caret",
+        "redirects",
+        "exe-parens-spaces",
+        "trailing-backslash",
+    ],
+)
+def test_proxy_command_windows_quotes_cmd_metacharacters(mocker, exe, name, quoted):
+    r"""cmd.exe metacharacters force quoting even when there is no whitespace.
+
+    `list2cmdline` alone only quotes on spaces/tabs, so ``x&calc`` would be
+    chained by cmd.exe and ``C:\Program Files (x86)\...`` needs its trailing
+    backslash doubled inside the quotes (MSVCRT rules).
+    """
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", exe)
+
+    cmd = ssh_module._proxy_command(_make_session(name=name), None)
+
+    assert quoted in cmd
+    # Plain arguments (no whitespace, no metacharacter) stay unquoted.
+    assert "-m colab_cli.cli ssh --proxy-mode -s" in cmd
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["%", 'a"b', "a!b", "a\nb"],
+    ids=["percent", "double-quote", "bang", "newline"],
+)
+def test_proxy_command_windows_rejects_cmd_unsafe_characters(mocker, capsys, bad):
+    """cmd.exe cannot carry `%` (expansion), `"`, `!`, or newlines."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", r"C:\tools\py.exe")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        ssh_module._proxy_command(_make_session(name=f"x{bad}y"), None)
+
+    assert excinfo.value.exit_code == 2
+    assert "cmd.exe" in capsys.readouterr().err
+
+
+def test_proxy_command_posix_allows_percent_and_bang(mocker):
+    """The win32 restriction must not leak into the POSIX serialization."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=False)
+
+    cmd = ssh_module._proxy_command(_make_session(name="a%b!c"), None)
+
+    assert shlex.split(cmd)[-1] == "a%b!c"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="CommandLineToArgvW is Windows-only"
+)
+@pytest.mark.parametrize(
+    ("exe", "name"),
+    [
+        (r"C:\tools\py.exe", "x&calc"),
+        (r"C:\tools\py.exe", "a|b"),
+        (r"C:\tools\py.exe", "a(b)"),
+    ],
+    ids=["ampersand", "pipe", "parens"],
+)
+def test_proxy_command_windows_metachars_round_trip_through_crt_argv(mocker, exe, name):
+    """Quoted metachar/trailing-backslash args survive CRT argv parsing."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", exe)
+
+    cmd = ssh_module._proxy_command(_make_session(name=name), None)
+
+    assert _shell32_argv(cmd) == [
+        exe,
+        "-m",
+        "colab_cli.cli",
+        "ssh",
+        "--proxy-mode",
+        "-s",
+        name,
+    ]
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="CommandLineToArgvW is Windows-only"
+)
+def test_proxy_command_windows_round_trips_through_crt_argv(mocker):
+    """A spaces-in-path executable survives cmd.exe word splitting."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=True)
+    mocker.patch.object(sys, "executable", _WIN_EXE)
+
+    cmd = ssh_module._proxy_command(_make_session(name="a b"), "/k/id ed25519")
+
+    assert f'"{_WIN_EXE}"' in cmd
+    assert _shell32_argv(cmd) == [
+        _WIN_EXE,
+        "-m",
+        "colab_cli.cli",
+        "ssh",
+        "--proxy-mode",
+        "-s",
+        "a b",
+        "--identity",
+        "/k/id ed25519",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("is_windows", "expected"),
+    [(True, "UserKnownHostsFile=NUL"), (False, "UserKnownHostsFile=/dev/null")],
+    ids=["win32", "posix"],
+)
+def test_ssh_base_args_use_platform_null_device(mocker, is_windows, expected):
+    """F11: Windows OpenSSH maps `/dev/null` to a bogus path; use NUL there."""
+    mocker.patch.object(ssh_module, "_is_windows", return_value=is_windows)
+    args = ssh_module._ssh_base_args("colab ssh --proxy-mode", None)
+    assert expected in args
+
+
 # --- ProxyCommand shell quoting ---------------------------------------------
 
 
@@ -309,12 +519,12 @@ def test_bridge_proxy_mode_pumps_stdin_to_ws(mocker):
 def test_proxy_command_round_trips_through_the_shell(name, identity):
     """The ProxyCommand string must re-parse into the exact argv.
 
-    `ssh` hands the ProxyCommand to /bin/sh, so every argument has to survive
-    word-splitting verbatim -- a hostile session name must arrive as one
-    literal argument, never as a new word or a substitution.
+    `ssh` hands the ProxyCommand to the platform shell, so every argument has
+    to survive word-splitting verbatim -- a hostile session name must arrive
+    as one literal argument, never as a new word or a substitution.
     """
     cmd = ssh_module._proxy_command(_make_session(name=name), identity)
-    argv = shlex.split(cmd)
+    argv = _parse_proxy_command(cmd)
 
     assert argv[:7] == [
         sys.executable,
@@ -387,18 +597,14 @@ def test_ssh_proxy_mode_calls_websocket(mock_common_state, mocker):
     connect = mocker.patch.object(
         ssh_module, "_connect_websocket", return_value=fake_ws
     )
-    bridge = mocker.patch.object(
-        ssh_module, "_bridge_proxy_mode", return_value=0
-    )
+    bridge = mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
     ssh_subprocess = mocker.patch.object(ssh_module, "_run_interactive_ssh")
 
     result = runner.invoke(app, ["ssh", "--proxy-mode", "-s", "s1"])
     assert result.exit_code == 0
     connect.assert_called_once()
     args, _ = connect.call_args
-    assert args[0].startswith(
-        "wss://abc-foo.colab.googleusercontent.com/colab/ssh"
-    )
+    assert args[0].startswith("wss://abc-foo.colab.googleusercontent.com/colab/ssh")
     assert args[1] == fake_pub
     bridge.assert_called_once_with(fake_ws)
     ssh_subprocess.assert_not_called()
@@ -445,9 +651,7 @@ def test_ssh_pubkey_passes_through_verbatim(mock_common_state, mocker):
         captured["url"] = url
         return MagicMock()
 
-    mocker.patch.object(
-        ssh_module, "_connect_websocket", side_effect=fake_connect
-    )
+    mocker.patch.object(ssh_module, "_connect_websocket", side_effect=fake_connect)
     mocker.patch.object(ssh_module, "_bridge_proxy_mode", return_value=0)
 
     runner.invoke(app, ["ssh", "--proxy-mode", "-s", "s1"])
@@ -474,9 +678,7 @@ def test_ssh_handshake_400_emits_actionable_message(
         ssh_module, "_resolve_pubkey", return_value="ssh-rsa AAAAfake u@h"
     )
 
-    err = websocket.WebSocketBadStatusException(
-        "Handshake status 400 Bad Request", 400
-    )
+    err = websocket.WebSocketBadStatusException("Handshake status 400 Bad Request", 400)
     err.status_code = 400
     err.resp_body = resp_body
     mocker.patch.object(websocket.WebSocket, "connect", side_effect=err)

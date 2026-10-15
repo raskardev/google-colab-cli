@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-15: Reads and writes of `sessions.json`/`settings.json` now pass `encoding="utf-8"` explicitly, matching `history.py`. Without it, Windows decoded the JSON with the cp1252 default, so session names or config values containing non-ASCII bytes were corrupted or raised `UnicodeDecodeError`.
 2026-10-14: Added configurable HTTP request timeouts and bounded allocation retries. Uncertain allocation POSTs are reconciled by GET using the same notebook hash before resubmission.
 2026-09-25: Runtime proxy tokens are now refreshed before expiry. `SessionState` persists `token_expires_at`, and `State.get_session` re-fetches the token via `GET /tun/m/assignments` when it's within 5 minutes of expiring.
 2026-09-25: Removed the keep-alive background daemon and related client/CLI ping functions. VM liveness is automatically maintained by the Colab backend based on kernel activity.

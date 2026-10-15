@@ -1,0 +1,71 @@
+# GitHub Actions CI: unit tests + lint on Windows only.
+#
+# This fork exists to make the CLI work on native Windows, so CI only runs the
+# Windows leg. Linux/macOS are not exercised here: keep POSIX code paths behind
+# platform guards and reason about them explicitly (see the windows-compat skill).
+#
+# This workflow runs the *unit* test suite only. The integration tests under
+# integration/ are deliberately NOT run here: they talk to the live Colab
+# backend and every successful assignment allocates a real (billable) VM, plus
+# several of them require interactive auth. Run those locally instead.
+#
+# Matrix note: `requires-python = ">=3.12"` in pyproject.toml with no upper
+# bound, so we test the oldest supported interpreter (3.12, also the version in
+# .python-version) and the newest one we support today (3.13).
+#
+# `PYTHONUTF8` is intentionally NOT set: Windows defaults to the cp1252 code
+# page and we want the suite to catch UTF-8/encoding regressions there rather
+# than papering over them.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs of the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (windows-latest, py${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      # Report every failing leg instead of aborting the matrix on the first.
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the package version from `git describe`, so the
+          # checkout needs the full history and tags (the Cloud Build release
+          # pipeline unshallows for the same reason).
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # Sets UV_PYTHON, which takes precedence over the repo's
+          # .python-version file, so each leg really uses its matrix version.
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run unit tests
+        run: uv run pytest tests/ -q
+
+      # Lint once (not per Python version): ruff's findings don't depend on it.
+      # examples/finetune_run.py's E402 is waived via per-file-ignores in
+      # pyproject.toml (it imports after a runtime pip install).
+      - name: Lint
+        if: matrix.python-version == '3.13'
+        run: uv run ruff check .

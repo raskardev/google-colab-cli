@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import json
 import os
 import sys
+import threading
 from unittest.mock import MagicMock, patch
 
 try:
@@ -40,6 +42,21 @@ def mock_session():
         url="https://8080-m-s-kkb-usc1f1.us-central1-1.colab.dev",
         endpoint="some-endpoint",
     )
+
+
+class SyncReaderThread:
+    """threading.Thread stand-in that runs the stdin reader synchronously.
+
+    The resize poller (if any) is not exercised by these tests.
+    """
+
+    def __init__(self, target, args=None, daemon=None):
+        self.target = target
+        self.args = args or ()
+
+    def start(self):
+        if self.target.__name__ == "read_stdin_loop":
+            self.target(*self.args)
 
 
 @needs_termios
@@ -81,11 +98,16 @@ def test_console_initialization(
 
     # 2. Verify raw mode setup and teardown
     mock_tcgetattr.assert_called_once_with(sys.stdin.fileno())
-    mock_setraw.assert_called_once_with(sys.stdin.fileno(), termios.TCSANOW)
+    mock_setraw.assert_called_once_with(
+        sys.stdin.fileno(),
+        termios.TCSANOW,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+    )
 
     # Teardown should happen in a finally block
     mock_tcsetattr.assert_called_once_with(
-        sys.stdin.fileno(), termios.TCSANOW, ["fake_attrs"]
+        sys.stdin.fileno(),
+        termios.TCSANOW,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+        ["fake_attrs"],
     )
 
 
@@ -166,23 +188,13 @@ def test_read_stdin_eof_piped_sends_exit_and_closes_ws(
 
     mock_ws = MagicMock()
 
-    # on_open spawns the read thread; we want it to run synchronously here
-    # so we patch threading.Thread to call target immediately and join().
-    real_thread = []
-
-    class SyncThread:
-        def __init__(self, target, daemon=None):
-            self.target = target
-            real_thread.append(self)
-
-        def start(self):
-            self.target()
-
     console_mod._is_running = True
-    with patch("colab_cli.console.threading.Thread", SyncThread):
+    with (
+        patch("colab_cli.console.threading.Thread", SyncReaderThread),
         # Use a tiny grace period for the test
-        with patch("colab_cli.console.PIPED_EOF_GRACE_SECONDS", 0.01):
-            on_open(mock_ws)
+        patch("colab_cli.console.PIPED_EOF_GRACE_SECONDS", 0.01),
+    ):
+        on_open(mock_ws)
 
     # Collect what was sent to the websocket
     sent_payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
@@ -217,15 +229,8 @@ def test_read_stdin_eof_tty_does_not_close_ws(
 
     mock_ws = MagicMock()
 
-    class SyncThread:
-        def __init__(self, target, daemon=None):
-            self.target = target
-
-        def start(self):
-            self.target()
-
     console_mod._is_running = True
-    with patch("colab_cli.console.threading.Thread", SyncThread):
+    with patch("colab_cli.console.threading.Thread", SyncReaderThread):
         on_open(mock_ws)
 
     sent_payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
@@ -235,9 +240,7 @@ def test_read_stdin_eof_tty_does_not_close_ws(
 
 @patch("colab_cli.console.websocket.WebSocketApp")
 @patch("colab_cli.console.sys.stdin.isatty")
-def test_console_no_termios_degrades_gracefully(
-    mock_isatty, mock_ws_app, mock_session
-):
+def test_console_no_termios_degrades_gracefully(mock_isatty, mock_ws_app, mock_session):
     """Windows has no termios/tty/SIGWINCH. connect_console must not crash.
 
     Regression test for `ModuleNotFoundError: No module named 'termios'`
@@ -259,3 +262,358 @@ def test_console_no_termios_degrades_gracefully(
         connect_console(mock_session)
 
     mock_ws_instance.run_forever.assert_called_once()
+
+
+# --- Windows resize polling (U8 step 1) ---
+
+
+def test_resize_poller_sends_on_change_and_sends_once_per_size():
+    """The resize poller forwards a {cols, rows} payload only when the
+    terminal size actually changes."""
+    import colab_cli.console as console_mod
+
+    sizes = iter(
+        [
+            os.terminal_size((80, 24)),
+            os.terminal_size((80, 24)),
+            os.terminal_size((120, 40)),
+        ]
+    )
+    stop_event = threading.Event()
+
+    def fake_size():
+        try:
+            return next(sizes)
+        except StopIteration:
+            stop_event.set()  # end the poll loop deterministically
+            return os.terminal_size((120, 40))
+
+    mock_ws = MagicMock()
+    with patch("colab_cli.console.os.get_terminal_size", side_effect=fake_size):
+        console_mod._resize_poller(mock_ws, stop_event, interval=0)
+
+    payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert payloads == [
+        {"cols": 80, "rows": 24},
+        {"cols": 120, "rows": 40},
+    ]
+
+
+def test_resize_poller_exits_when_stop_event_set():
+    import colab_cli.console as console_mod
+
+    stop_event = threading.Event()
+    stop_event.set()
+    mock_ws = MagicMock()
+
+    console_mod._resize_poller(mock_ws, stop_event, interval=0)
+
+    mock_ws.send.assert_not_called()
+
+
+def test_resize_poller_does_not_resend_size_sent_on_open():
+    """Regression: the poller must be initialised with the size on_open
+    already sent, so the first probe does not re-send it."""
+    import colab_cli.console as console_mod
+
+    sizes = iter(
+        [
+            os.terminal_size((80, 24)),  # same as the size sent on open
+            os.terminal_size((120, 40)),
+        ]
+    )
+    stop_event = threading.Event()
+
+    def fake_size():
+        try:
+            return next(sizes)
+        except StopIteration:
+            stop_event.set()
+            return os.terminal_size((120, 40))
+
+    mock_ws = MagicMock()
+    with patch("colab_cli.console.os.get_terminal_size", side_effect=fake_size):
+        console_mod._resize_poller(mock_ws, stop_event, interval=0, last=(80, 24))
+
+    payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert payloads == [{"cols": 120, "rows": 40}]
+
+
+def test_start_resize_poller_passes_current_size_as_baseline():
+    """start_resize_poller seeds the poller with the current terminal size —
+    the same payload on_open has just sent."""
+    import colab_cli.console as console_mod
+
+    captured = {}
+
+    class RecordingThread:
+        def __init__(self, target=None, args=None, daemon=None):
+            captured["args"] = args
+
+        def start(self):
+            pass
+
+    with (
+        patch.object(console_mod.signal, "SIGWINCH", None, create=True),
+        patch("colab_cli.console.threading.Thread", RecordingThread),
+        patch.object(console_mod.sys.stdin, "isatty", return_value=True),
+        patch(
+            "colab_cli.console.os.get_terminal_size",
+            return_value=os.terminal_size((100, 30)),
+        ),
+    ):
+        console_mod.start_resize_poller(MagicMock())
+        try:
+            assert (100, 30) in captured["args"]
+        finally:
+            console_mod.stop_resize_poller()
+
+
+def test_resize_poller_survives_size_query_errors():
+    """A failing os.get_terminal_size (e.g. redirected stdin) must not kill
+    the poller or send a payload."""
+    import colab_cli.console as console_mod
+
+    stop_event = threading.Event()
+    calls = {"n": 0}
+
+    def failing_size():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OSError("not a terminal")
+        stop_event.set()
+        return os.terminal_size((80, 24))
+
+    mock_ws = MagicMock()
+    with patch("colab_cli.console.os.get_terminal_size", side_effect=failing_size):
+        console_mod._resize_poller(mock_ws, stop_event, interval=0)
+
+    # The first successful probe after errors becomes (and forwards) the
+    # recovered baseline; no crash, no retry spam.
+    payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert payloads == [{"cols": 80, "rows": 24}]
+
+
+@patch("colab_cli.console.os.get_terminal_size")
+@patch("colab_cli.console.sys.stdin.isatty")
+def test_on_open_starts_resize_poller_without_sigwinch(mock_isatty, mock_get_term_size):
+    """On platforms without SIGWINCH (Windows) a resize-poller thread starts
+    when stdin is a TTY; it must not start on POSIX (SIGWINCH covers it)."""
+    import colab_cli.console as console_mod
+
+    started = []
+
+    class RecordingThread:
+        def __init__(self, target=None, args=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            started.append(self)
+
+    mock_isatty.return_value = True
+    mock_get_term_size.return_value = os.terminal_size((80, 24))
+    mock_ws = MagicMock()
+
+    # Simulate Windows: no SIGWINCH
+    with (
+        patch.object(console_mod.signal, "SIGWINCH", None, create=True),
+        patch("colab_cli.console.threading.Thread", RecordingThread),
+    ):
+        console_mod._is_running = True
+        try:
+            on_open(mock_ws)
+            targets = [t.target for t in started]
+            assert console_mod._resize_poller in targets
+            assert len(started) == 2  # stdin reader + resize poller
+        finally:
+            console_mod._is_running = False
+            console_mod.stop_resize_poller()
+
+
+def test_on_open_does_not_start_resize_poller_with_sigwinch():
+    """POSIX keeps SIGWINCH: no polling thread."""
+    import colab_cli.console as console_mod
+
+    started = []
+
+    class RecordingThread:
+        def __init__(self, target=None, args=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            started.append(self)
+
+    mock_ws = MagicMock()
+    fake_sigwinch = 28  # truthy stand-in for signal.SIGWINCH
+    with (
+        patch.object(console_mod.signal, "SIGWINCH", fake_sigwinch, create=True),
+        patch("colab_cli.console.threading.Thread", RecordingThread),
+        patch.object(console_mod.sys.stdin, "isatty", return_value=True),
+        patch.object(console_mod.sys, "stdin", MagicMock(read=lambda n: "")),
+    ):
+        console_mod._is_running = True
+        try:
+            on_open(mock_ws)
+            targets = [t.target for t in started]
+            assert console_mod._resize_poller not in targets
+            assert len(started) == 1  # stdin reader only
+        finally:
+            console_mod._is_running = False
+            console_mod.stop_resize_poller()
+
+
+def test_stop_resize_poller_signals_event():
+    import colab_cli.console as console_mod
+
+    # Simulate Windows (no SIGWINCH) with a TTY so the poller actually starts
+    with (
+        patch.object(console_mod.signal, "SIGWINCH", None, create=True),
+        patch.object(console_mod.sys.stdin, "isatty", return_value=True),
+        patch("colab_cli.console.threading.Thread"),
+    ):
+        console_mod.start_resize_poller(MagicMock())
+        assert console_mod._resize_stop_event is not None
+        assert not console_mod._resize_stop_event.is_set()
+
+        console_mod.stop_resize_poller()
+        assert console_mod._resize_stop_event.is_set()
+
+
+# --- Windows raw-key reader integration (U8 step 2) ---
+
+
+def test_read_stdin_uses_win_read_key_when_active():
+    """When use_win_raw is passed (Windows TTY), the stdin reader loop
+    sources characters from colab_cli.win_console.read_key instead of
+    sys.stdin.read, and a None key ends the loop without closing the socket."""
+    import colab_cli.console as console_mod
+
+    mock_ws = MagicMock()
+    keys = iter(["l", "s", "\r", None])
+    with patch.object(
+        console_mod.win_console, "read_key", side_effect=lambda: next(keys)
+    ):
+        console_mod._is_running = True
+        try:
+            console_mod.read_stdin_loop(mock_ws, is_tty=True, use_win_raw=True)
+        finally:
+            console_mod._is_running = False
+
+    sent = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert sent == [{"data": "l"}, {"data": "s"}, {"data": "\r"}]
+    mock_ws.close.assert_not_called()
+
+
+def test_read_stdin_skips_dropped_win_keys():
+    """Regression: a dropped key from win_console.read_key ("" for an
+    unmapped virtual key) must be skipped, never treated as EOF — previously
+    an empty string broke the loop and the session lost all input."""
+    import colab_cli.console as console_mod
+
+    mock_ws = MagicMock()
+    keys = iter(["", "", "l", "s", "\r", None])
+    with patch.object(
+        console_mod.win_console, "read_key", side_effect=lambda: next(keys)
+    ):
+        console_mod._is_running = True
+        try:
+            console_mod.read_stdin_loop(mock_ws, is_tty=True, use_win_raw=True)
+        finally:
+            console_mod._is_running = False
+
+    sent = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert sent == [{"data": "l"}, {"data": "s"}, {"data": "\r"}]
+    # Only a None (failed console read) ends the loop; the dropped keys did
+    # not, and the socket stays open (the remote shell owns it).
+    mock_ws.close.assert_not_called()
+
+
+def test_read_stdin_piped_path_ignores_win_read_key():
+    """Piped mode must keep using sys.stdin.read even when the caller passes
+    use_win_raw=True (no regression on the piped path)."""
+    import colab_cli.console as console_mod
+
+    mock_ws = MagicMock()
+    chars = iter(["h", "i", "\n", ""])
+    mock_stdin = MagicMock()
+    mock_stdin.read.side_effect = lambda n: next(chars)
+    with patch.object(console_mod.sys, "stdin", mock_stdin):
+        console_mod._is_running = True
+        try:
+            with patch("colab_cli.console.PIPED_EOF_GRACE_SECONDS", 0.01):
+                console_mod.read_stdin_loop(mock_ws, is_tty=False, use_win_raw=True)
+        finally:
+            console_mod._is_running = False
+
+    sent = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
+    assert {"data": "exit\n"} in sent
+    mock_ws.close.assert_called_once()
+
+
+@patch("colab_cli.console.websocket.WebSocketApp")
+@patch("colab_cli.console.sys.stdin.isatty")
+def test_connect_console_activates_win_raw_mode(mock_isatty, mock_ws_app, mock_session):
+    """On win32 with a TTY, connect_console enters the Windows raw-console
+    context (so raw input + VT output are active during run_forever) and wires
+    the raw reader mode into the on_open callback."""
+    import colab_cli.console as console_mod
+
+    mock_isatty.return_value = True
+    mock_ws_instance = MagicMock()
+    mock_ws_app.return_value = mock_ws_instance
+
+    entered = []
+
+    @contextlib.contextmanager
+    def fake_raw_console():
+        entered.append("enter")
+        try:
+            yield
+        finally:
+            entered.append("exit")
+
+    with (
+        patch("colab_cli.console.sys.platform", "win32"),
+        patch.object(console_mod.win_console, "windows_raw_console", fake_raw_console),
+        patch("colab_cli.console.threading.Thread"),
+    ):
+        console_mod._is_running = True
+        connect_console(mock_session)
+
+    assert entered == ["enter", "exit"]
+    on_open_cb = mock_ws_app.call_args.kwargs["on_open"]
+    assert on_open_cb.keywords == {"use_win_raw": True}
+    mock_ws_instance.run_forever.assert_called_once()
+
+
+@patch("colab_cli.console.websocket.WebSocketApp")
+@patch("colab_cli.console.sys.stdin.isatty")
+def test_connect_console_falls_back_when_win_raw_setup_fails(
+    mock_isatty, mock_ws_app, mock_session
+):
+    """If the raw-mode setup fails (e.g. not a real console), the session
+    still runs in degraded line mode instead of crashing."""
+    import colab_cli.console as console_mod
+
+    mock_isatty.return_value = True
+    mock_ws_instance = MagicMock()
+    mock_ws_app.return_value = mock_ws_instance
+
+    def failing_raw_console():
+        raise OSError("stdin is not a console")
+        yield  # pragma: no cover - makes it a generator for contextmanager
+
+    with (
+        patch("colab_cli.console.sys.platform", "win32"),
+        patch.object(
+            console_mod.win_console,
+            "windows_raw_console",
+            side_effect=OSError("stdin is not a console"),
+        ),
+        patch("colab_cli.console.threading.Thread"),
+    ):
+        connect_console(mock_session)  # must not raise
+
+    mock_ws_instance.run_forever.assert_called_once()
+    on_open_cb = mock_ws_app.call_args.kwargs["on_open"]
+    assert on_open_cb.keywords == {"use_win_raw": False}

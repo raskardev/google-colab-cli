@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import functools
 import json
 import logging
 import os
@@ -32,6 +34,7 @@ from urllib.parse import urlparse
 
 import websocket
 
+from colab_cli import win_console
 from colab_cli.state import SessionState
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,14 @@ _last_error = None
 # wrapped in tmux + bash; bumping it just delays exit, lowering it risks
 # truncating tail output.
 PIPED_EOF_GRACE_SECONDS = 0.5
+
+# Interval for polling the terminal size on platforms without SIGWINCH
+# (Windows). Only active while a console session is running; the poller thread
+# exits as soon as the session ends (stop event set on close). Fire-and-forget:
+# no thread outlives the command.
+RESIZE_POLL_INTERVAL_SECONDS = 0.5
+
+_resize_stop_event = None
 
 
 def on_message(ws, message):
@@ -73,6 +84,30 @@ def on_close(ws, close_status_code, close_msg):
     """Callback for when the websocket is closed."""
     global _is_running
     _is_running = False
+    stop_resize_poller()
+
+
+def _resize_poller(ws, stop_event, interval=RESIZE_POLL_INTERVAL_SECONDS, last=None):
+    """Polls the terminal size and forwards it when it changes.
+
+    Used on platforms without SIGWINCH (Windows). Every size change —
+    including the first successful probe after earlier failures — is
+    forwarded with the same payload as send_terminal_size. ``last`` is the
+    baseline; on_open passes the size it already sent so the poller does not
+    re-send the initial size.
+    """
+    while not stop_event.is_set():
+        try:
+            size = os.get_terminal_size()
+            current = (size.columns, size.lines)
+            if current != last:
+                ws.send(json.dumps({"cols": current[0], "rows": current[1]}))
+            last = current
+        except Exception as e:
+            # Redirected/invalid stdin or a dying websocket: keep polling until
+            # the stop event fires so a transient error doesn't kill resize.
+            logger.debug(f"Resize poll failed: {e}")
+        stop_event.wait(interval)
 
 
 def send_terminal_size(ws):
@@ -85,19 +120,64 @@ def send_terminal_size(ws):
         logger.debug(f"Failed to send terminal size: {e}")
 
 
-def on_open(ws):
-    """Callback for when the websocket connection is opened."""
-    global _is_running
-    _is_running = True
+def start_resize_poller(ws):
+    """Starts the resize-polling thread when SIGWINCH is unavailable.
 
-    # Send initial terminal size
-    send_terminal_size(ws)
+    No-op on POSIX (SIGWINCH handles resize) and when stdin is not a TTY
+    (piped sessions have no meaningful terminal size).
+    """
+    global _resize_stop_event
+    if getattr(signal, "SIGWINCH", None) is not None:
+        return
+    try:
+        if not sys.stdin.isatty():
+            return
+    except Exception:
+        return
+    # Baseline with the size on_open has just sent, so the first poll does
+    # not re-send it.
+    try:
+        size = os.get_terminal_size()
+        initial = (size.columns, size.lines)
+    except Exception:
+        initial = None
+    _resize_stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_resize_poller,
+        args=(ws, _resize_stop_event, RESIZE_POLL_INTERVAL_SECONDS, initial),
+        daemon=True,
+    )
+    thread.start()
 
-    # Setup the background thread to read from stdin
-    def read_stdin():
-        is_tty = sys.stdin.isatty()
-        while _is_running:
-            try:
+
+def stop_resize_poller():
+    """Signals the resize poller (if any) to exit."""
+    if _resize_stop_event is not None:
+        _resize_stop_event.set()
+
+
+def read_stdin_loop(ws, is_tty, use_win_raw=False):
+    """Reads keystrokes from stdin and forwards them over the websocket.
+
+    On Windows TTY sessions (raw console mode active) characters come from
+    win_console.read_key(); otherwise sys.stdin.read(1) is used, which yields
+    line-buffered input on Windows and raw bytes on POSIX raw mode.
+    """
+    while _is_running:
+        try:
+            if use_win_raw and is_tty:
+                char = win_console.read_key()
+                if char is None:
+                    # EOF from the Windows console: behave like the POSIX TTY
+                    # path (stop reading; the remote shell owns the socket).
+                    break
+                if not char:
+                    # Dropped key event (unmapped virtual key, corrupt
+                    # surrogate, ...): skip it but keep the session alive —
+                    # a dropped key must never end the input loop.
+                    continue
+                ws.send(json.dumps({"data": char}))
+            else:
                 # Read a single character (or escape sequence byte)
                 char = sys.stdin.read(1)
                 if not char:
@@ -112,24 +192,46 @@ def on_open(ws):
                         try:
                             ws.send(json.dumps({"data": "exit\n"}))
                         except Exception:
-                            pass
+                            logger.debug(
+                                "Piped EOF: failed to send exit", exc_info=True
+                            )
                         time.sleep(PIPED_EOF_GRACE_SECONDS)
                         try:
                             ws.close()
                         except Exception:
-                            pass
+                            logger.debug("Piped EOF: failed to close ws", exc_info=True)
                     break
                 ws.send(json.dumps({"data": char}))
-            except Exception:
-                break
+        except Exception:
+            break
 
-    thread = threading.Thread(target=read_stdin, daemon=True)
+
+def on_open(ws, use_win_raw=False):
+    """Callback for when the websocket connection is opened."""
+    global _is_running
+    _is_running = True
+
+    # Send initial terminal size
+    send_terminal_size(ws)
+
+    # Setup the background thread to read from stdin
+    is_tty = sys.stdin.isatty()
+    thread = threading.Thread(
+        target=read_stdin_loop, args=(ws, is_tty, use_win_raw), daemon=True
+    )
     thread.start()
+
+    # On platforms without SIGWINCH (Windows), watch for resizes by polling.
+    start_resize_poller(ws)
 
 
 def connect_console(session: SessionState):
     """
     Connects to the Colab TTY endpoint and sets up a raw terminal session.
+
+    POSIX TTYs get termios raw mode + SIGWINCH resize. Windows TTYs get raw
+    input + VT output via colab_cli.win_console (and resize via polling, see
+    start_resize_poller). Piped stdin keeps line mode on every platform.
     """
     global _is_running, _last_error
     _last_error = None
@@ -146,52 +248,63 @@ def connect_console(session: SessionState):
     if can_raw:
         try:
             fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
+            old_settings = termios.tcgetattr(fd)  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
         except Exception:
             fd = None
             old_settings = None
             can_raw = False
 
-    ws = websocket.WebSocketApp(
-        url=ws_url,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-    )
-
-    def handle_sigwinch(signum, frame):
-        """Handle window resize events."""
-        if _is_running:
-            send_terminal_size(ws)
-
     sigwinch = getattr(signal, "SIGWINCH", None)
-    try:
-        if can_raw:
-            tty.setraw(fd, termios.TCSANOW)
-            if sigwinch is not None:
-                signal.signal(sigwinch, handle_sigwinch)
-
-        # This is a blocking call until the connection is closed
-        ws.run_forever()
-
-        if _last_error:
-            # Re-raise or wrap terminal errors
-            err_msg = str(_last_error)
-            if "404" in err_msg or "401" in err_msg:
-                # We raise a standard exception that the caller can recognize
-                raise RuntimeError(f"Connection failed: {err_msg}")
-    finally:
-        if can_raw:
-            # Always ensure the terminal is restored to its original state
+    with contextlib.ExitStack() as stack:
+        # Raw keyboard input + VT rendering for the whole session. If the
+        # console setup fails (e.g. stdin is not a real console), degrade
+        # to line mode instead of failing the session.
+        use_win_raw = False
+        if sys.platform == "win32" and is_tty:
             try:
-                termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-            except Exception:
-                pass
-            # Restore the default signal handler for resize
-            if sigwinch is not None:
-                try:
-                    signal.signal(sigwinch, signal.SIG_DFL)
-                except Exception:
-                    pass
+                stack.enter_context(win_console.windows_raw_console())
+                use_win_raw = True
+            except OSError as e:
+                logger.debug(f"Windows raw console unavailable: {e}")
+
+        ws = websocket.WebSocketApp(
+            url=ws_url,
+            on_open=functools.partial(on_open, use_win_raw=use_win_raw),
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+
+        def handle_sigwinch(signum, frame):
+            """Handle window resize events."""
+            if _is_running:
+                send_terminal_size(ws)
+
+        try:
+            if can_raw:
+                tty.setraw(fd, termios.TCSANOW)  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                if sigwinch is not None:
+                    signal.signal(sigwinch, handle_sigwinch)
+
+            # This is a blocking call until the connection is closed
+            ws.run_forever()
+
+            if _last_error:
+                # Re-raise or wrap terminal errors
+                err_msg = str(_last_error)
+                if "404" in err_msg or "401" in err_msg:
+                    # We raise a standard exception that the caller can recognize
+                    raise RuntimeError(f"Connection failed: {err_msg}")
+        finally:
+            if can_raw:
+                # Always ensure the terminal is restored to its original state
+                with contextlib.suppress(Exception):
+                    termios.tcsetattr(fd, termios.TCSANOW, old_settings)  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                # Restore the default signal handler for resize
+                if sigwinch is not None:
+                    with contextlib.suppress(Exception):
+                        signal.signal(sigwinch, signal.SIG_DFL)
+            # Stop the resize poller (Windows) before restoring console modes.
+            _is_running = False
+            stop_resize_poller()
         print("\r\nConnection closed.")

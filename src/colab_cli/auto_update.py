@@ -25,11 +25,14 @@ callback (``cli.py``) calls ``check_for_updates`` once per day and
 import json
 import platform
 import subprocess
+import sys
 import urllib.request
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as installed_version
-from packaging.version import InvalidVersion, Version
+from pathlib import Path
 from typing import Optional
+
+from packaging.version import InvalidVersion, Version
 
 import typer
 
@@ -45,7 +48,22 @@ PYPI_PACKAGE_NAME = "google-colab-cli"
 
 def is_self_install_supported() -> bool:
     """Return True if self-install (--install) is supported on the current platform."""
-    return platform.system() in ("Linux", "Darwin")
+    return platform.system() in ("Linux", "Darwin", "Windows")
+
+
+def _is_uv_tool_install(executable: str | None = None) -> bool:
+    """Return True when ``executable`` lives under a ``uv tool`` install prefix.
+
+    Matches the path components ``uv``/``tools`` (backslash-normalised and
+    case-insensitive) so the Windows layout is detected too.
+    """
+    exe = executable if executable is not None else sys.executable
+    if not exe:
+        return False
+    parts = [part.lower() for part in Path(exe.replace("\\", "/")).parts]
+    return any(
+        a == "uv" and b == "tools" for a, b in zip(parts, parts[1:], strict=False)
+    )
 
 
 def get_app_version() -> str:
@@ -135,9 +153,7 @@ def announce_upgrade(
 
 def _get_install_command() -> str:
     """Return the recommended installation command based on the environment."""
-    import sys
-
-    if is_self_install_supported() and "/uv/tools/" in sys.executable:
+    if is_self_install_supported() and _is_uv_tool_install():
         return f"uv tool install -U {PYPI_PACKAGE_NAME}"
     return f"pip install --upgrade {PYPI_PACKAGE_NAME}"
 
@@ -233,11 +249,7 @@ def run_background_check() -> None:
 
 def self_install() -> None:
     """Upgrade the CLI in place, detecting uv vs pip."""
-    import sys
-
-    # If the executable path contains "/uv/", we assume it was installed via
-    # `uv tool install` and use `uv` to upgrade it.
-    if "/uv/tools/" in sys.executable:
+    if _is_uv_tool_install():
         cmd = ["uv", "tool", "install", "-U", PYPI_PACKAGE_NAME]
     else:
         cmd = [sys.executable, "-m", "pip", "install", "-U", PYPI_PACKAGE_NAME]

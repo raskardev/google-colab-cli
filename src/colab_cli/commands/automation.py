@@ -38,7 +38,6 @@ _console = Console()
 INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 600
 
 
-
 def run_automation(
     name: str,
     op: str,
@@ -103,7 +102,7 @@ def run_automation(
                 sys.stdout.write("Press Enter after you have granted access... ")
                 sys.stdout.flush()
                 try:
-                    with open("/dev/tty") as tty:
+                    with open("/dev/tty", encoding="utf-8") as tty:
                         tty.readline()
                 except (FileNotFoundError, OSError, IOError):
                     # Windows has no /dev/tty; fall back to stdin.

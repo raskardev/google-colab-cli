@@ -1,3 +1,8 @@
+---
+log:
+2026-10-15: `colab edit` now uses `tempfile.mkstemp` plus explicit cleanup in a `finally` block instead of `NamedTemporaryFile(delete=True)`. Windows locks a named temporary file while the handle is open, so the editor's own `open()` on the same path failed with `PermissionError`; the mkstemp path is not held open after creation. POSIX behaviour is unchanged (the SHA-256 before/after comparison is intact and the temp file is always removed).
+---
+
 # Design: File Management (`ls`, `rm`, `upload`, `download`, `edit`)
 
 ## Overview
@@ -40,6 +45,7 @@ File management on the Colab VM will be implemented using the Jupyter Contents A
 - **Approach**: Combines downloading the remote file, opening it in the user's `$EDITOR` locally, and subsequently uploading the changed file if modifications were made.
 - **State tracking**: Uses a SHA-256 hash to track file changes securely and deterministically between before and after the editor is invoked.
 - **Fallbacks**: Creates an empty local temporary file if the target file on the Colab runtime doesn't exist yet, essentially acting like `touch`.
+- **Portability**: The local temp file is created with `tempfile.mkstemp` (handle closed immediately) and deleted in a `finally`, so the editor can reopen it on Windows. `$EDITOR`/`$VISUAL` are honoured by `click`; when neither is set on Windows it falls back to `notepad`, which saves CRLF line endings (see README).
 
 ## Implementation Details
 - **Base URL**: The backend URL obtained during session assignment.

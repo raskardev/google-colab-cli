@@ -97,7 +97,7 @@ def test_get_credentials_expired_token_refresh(mock_deps):
         res = get_credentials("dummy_config.json", provider=AuthProvider.OAUTH2)
 
     mock_creds.refresh.assert_called_once()
-    m_open.assert_any_call(TOKEN_CONFIG_PATH, "w")
+    m_open.assert_any_call(TOKEN_CONFIG_PATH, "w", encoding="utf-8")
     assert res == mock_deps["session"].return_value
 
 

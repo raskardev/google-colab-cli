@@ -14,7 +14,38 @@
 
 import pytest
 import typer
+import typer.rich_utils
 from unittest.mock import MagicMock
+
+
+@pytest.fixture(autouse=True)
+def plain_help_output(monkeypatch):
+    # Typer forces a color terminal when GITHUB_ACTIONS, FORCE_COLOR or
+    # PY_COLORS is set, so help output in CI carries ANSI escapes that break
+    # the tests parsing it. Render plain text everywhere.
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", False)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_update_check: keep the CLI's background update check enabled",
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_background_update_check(request, mocker):
+    # The global CLI callback runs the daily PyPI update check, which would
+    # make a real network request and print the upgrade banner into captured
+    # output. Tests that exercise it opt back in with `real_update_check`.
+    # pytest.fail raises a BaseException, so `except Exception` in the update
+    # code cannot swallow it.
+    def _no_network(*args, **kwargs):
+        pytest.fail("tests must not make real network requests (urlopen)")
+
+    mocker.patch("urllib.request.urlopen", side_effect=_no_network)
+    if not request.node.get_closest_marker("real_update_check"):
+        mocker.patch("colab_cli.auto_update.run_background_check")
 
 
 @pytest.fixture(autouse=True)
