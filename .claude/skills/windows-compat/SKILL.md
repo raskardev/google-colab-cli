@@ -1,6 +1,6 @@
 ---
 name: windows-compat
-description: Rules and pitfalls for keeping Colab CLI working on native Windows as well as Linux/macOS - platform guards, cmd.exe ProxyCommand quoting, raw console input via ReadConsoleInputW, UTF-8 I/O, and writing tests that pass on all three CI legs. Use when touching ssh.py, console.py, win_console.py, file I/O, subprocess calls, signals or terminal handling, or when adding tests with platform branches.
+description: Rules and pitfalls for keeping Colab CLI working on native Windows as well as Linux/macOS - platform guards, cmd.exe ProxyCommand quoting, raw console input via ReadConsoleInputW, UTF-8 I/O, and writing tests that pass on Windows CI without breaking POSIX. Use when touching ssh.py, console.py, win_console.py, file I/O, subprocess calls, signals or terminal handling, or when adding tests with platform branches.
 ---
 
 # Windows compatibility (Colab CLI)
@@ -33,8 +33,9 @@ Background and decisions: `docs/plans/windows-support.md` (findings F1-F21, deci
 - `ctypes.wintypes` imports on every platform; `ctypes.windll`/`WinDLL`/`msvcrt` do not. Keep
   `ctypes.wintypes` at module top; create kernel32 handles only under `sys.platform == "win32"`.
 
-## Rules for tests (CI: ubuntu, macos, windows x py3.12/3.13)
-- No Linux machine is available locally (no WSL): reason about POSIX legs explicitly. Before
+## Rules for tests (CI: windows-latest x py3.12/3.13 only)
+- CI runs only on Windows (user decision, 2026-10-15) and no Linux machine is available locally
+  (no WSL): nothing exercises POSIX, so reason about those paths explicitly. Before
   finishing, grep changed tests for `windll`, `WinDLL`, `msvcrt`, `wintypes`, `C:\\`, `NUL`,
   `CommandLineToArgvW` and check each is behind `skipif(sys.platform != "win32")` or a fake.
 - Tests that patch `sys.platform` still run real module-level code imported earlier: patch the

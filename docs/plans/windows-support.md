@@ -219,6 +219,7 @@ U11 depende de D3 y, para su parte Python, de U10.
 - `uv run colab --help` + `--help` de los 27 subcomandos como smoke post-cambio (exit 0 en los 3 SO).
 
 **CI (U10):** matriz `ubuntu-latest` / `macos-latest` / `windows-latest`, Python 3.12 y 3.13, solo unit tests.
+Actualización 2026-10-15: por decisión del usuario la CI solo ejecuta `windows-latest` (3.12 y 3.13); Linux y macOS ya no se validan en CI.
 Nada que asigne VMs.
 
 **Manuales que SOLO el usuario puede ejecutar en Windows (interactivos; el agente no puede):**

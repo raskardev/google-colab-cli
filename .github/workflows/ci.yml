@@ -1,4 +1,8 @@
-# GitHub Actions CI: unit tests + lint on Linux, macOS and Windows.
+# GitHub Actions CI: unit tests + lint on Windows only.
+#
+# This fork exists to make the CLI work on native Windows, so CI only runs the
+# Windows leg. Linux/macOS are not exercised here: keep POSIX code paths behind
+# platform guards and reason about them explicitly (see the windows-compat skill).
 #
 # This workflow runs the *unit* test suite only. The integration tests under
 # integration/ are deliberately NOT run here: they talk to the live Colab
@@ -29,14 +33,13 @@ permissions:
 
 jobs:
   test:
-    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+    name: test (windows-latest, py${{ matrix.python-version }})
+    runs-on: windows-latest
     timeout-minutes: 15
     strategy:
       # Report every failing leg instead of aborting the matrix on the first.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12", "3.13"]
 
     steps:
@@ -60,9 +63,9 @@ jobs:
       - name: Run unit tests
         run: uv run pytest tests/ -q
 
-      # Lint once (not per-OS): ruff's findings are platform independent.
+      # Lint once (not per Python version): ruff's findings don't depend on it.
       # examples/finetune_run.py's E402 is waived via per-file-ignores in
       # pyproject.toml (it imports after a runtime pip install).
       - name: Lint
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13'
         run: uv run ruff check .
