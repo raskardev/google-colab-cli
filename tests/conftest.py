@@ -14,7 +14,16 @@
 
 import pytest
 import typer
+import typer.rich_utils
 from unittest.mock import MagicMock
+
+
+@pytest.fixture(autouse=True)
+def plain_help_output(monkeypatch):
+    # Typer forces a color terminal when GITHUB_ACTIONS, FORCE_COLOR or
+    # PY_COLORS is set, so help output in CI carries ANSI escapes that break
+    # the tests parsing it. Render plain text everywhere.
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", False)
 
 
 @pytest.fixture(autouse=True)

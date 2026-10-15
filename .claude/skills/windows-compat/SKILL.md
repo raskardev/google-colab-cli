@@ -40,6 +40,11 @@ Background and decisions: `docs/plans/windows-support.md` (findings F1-F21, deci
   `CommandLineToArgvW` and check each is behind `skipif(sys.platform != "win32")` or a fake.
 - Tests that patch `sys.platform` still run real module-level code imported earlier: patch the
   module's own switch (`_is_windows`, `_kernel32`) instead.
+- Typer forces a color terminal when `GITHUB_ACTIONS`/`FORCE_COLOR`/`PY_COLORS` is set; tests
+  that parse `--help` output rely on the autouse `plain_help_output` fixture in
+  `tests/conftest.py`. Reproduce CI-only help failures locally with `GITHUB_ACTIONS=true`.
+- Moving a worktree breaks `.venv` console-script trampolines ("uv trampoline failed to
+  canonicalize script path"): run `uv sync --reinstall`, or use `.venv\Scripts\python -m pytest`.
 - prompt_toolkit tests need `create_app_session(input=create_pipe_input(), output=DummyOutput())`
   on Windows (pytest stdout is not a Win32 console).
 - Run pytest with a hard timeout (PowerShell `Start-Job` + `Wait-Job -Timeout`). A hung run
