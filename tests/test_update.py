@@ -22,6 +22,8 @@ from colab_cli import auto_update
 from colab_cli.cli import app
 from colab_cli.state import Settings
 
+pytestmark = pytest.mark.real_update_check
+
 runner = CliRunner()
 
 
