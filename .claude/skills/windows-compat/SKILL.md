@@ -43,6 +43,12 @@ Background and decisions: `docs/plans/windows-support.md` (findings F1-F21, deci
 - Typer forces a color terminal when `GITHUB_ACTIONS`/`FORCE_COLOR`/`PY_COLORS` is set; tests
   that parse `--help` output rely on the autouse `plain_help_output` fixture in
   `tests/conftest.py`. Reproduce CI-only help failures locally with `GITHUB_ACTIONS=true`.
+- Tests are network-free: the autouse `no_background_update_check` fixture stubs
+  `auto_update.run_background_check` (opt back in with `@pytest.mark.real_update_check`, as
+  `test_update.py` does) and makes `urllib.request.urlopen` call `pytest.fail` (a BaseException,
+  so `except Exception` can't hide it). Tests that need urlopen must patch it themselves.
+- Don't run two pytest processes in the same checkout at once: `test_log_export` writes
+  `test-export.ipynb` to the cwd and the runs collide (PermissionError).
 - Moving a worktree breaks `.venv` console-script trampolines ("uv trampoline failed to
   canonicalize script path"): run `uv sync --reinstall`, or use `.venv\Scripts\python -m pytest`.
 - prompt_toolkit tests need `create_app_session(input=create_pipe_input(), output=DummyOutput())`
